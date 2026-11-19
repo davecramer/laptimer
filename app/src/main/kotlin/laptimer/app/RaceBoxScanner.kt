@@ -38,7 +38,7 @@ class RaceBoxScanner(
             val name = record?.deviceName ?: result.device.name
             if (!hasService && name?.startsWith("RaceBox") != true) return
             // The name may not fit in the advertisement, as with the emulator.
-            onFound(FoundDevice(name ?: "RaceBox (no name)", result.device.address, result.rssi))
+            onFound(FoundDevice(name ?: NO_NAME, result.device.address, result.rssi))
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -63,6 +63,9 @@ class RaceBoxScanner(
     }
 
     companion object {
+        /** Shown for a device whose advertisement has no name in it. */
+        const val NO_NAME = "RaceBox (no name)"
+
         private const val SCAN_MILLIS = 15_000L
         private val SERVICE = ParcelUuid.fromString(RaceBox.SERVICE_UUID)
     }

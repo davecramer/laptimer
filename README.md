@@ -65,8 +65,8 @@ OpenStreetMap.
   simulated laps of Laguna Seca (built in), a test oval, or any track found
   in OpenStreetMap, and sends 25 Hz data frames exactly as the device does.
   The speed model (`core/DrivingSimulator.kt`) brakes for corners within a
-  grip limit, varies each lap slightly, and adds GPS noise. It can also drop
-  the connection or lose the GPS fix on demand.
+  grip limit, varies each lap slightly, and adds GPS noise. It can also
+  lose the GPS fix on demand.
 
 ## Build and test
 
@@ -108,8 +108,22 @@ for both.
    (no name)"; the emulator can rename itself to "RaceBox Emulator".
 
 The emulator shows the exact time of each simulated lap, measured where
-its loop starts, for comparing with the lap timer. "Drop connection" and
-"Lose GPS for 5 s" test reconnecting and fix loss.
+its loop starts, for comparing with the lap timer. "Lose GPS for 5 s"
+tests fix loss.
+
+To test reconnecting, turn Bluetooth off on the emulator's device, turn it
+on again, then tap Stop and "Start advertising" in the RaceBox Emulator.
+From a computer:
+
+    adb -s emulator-5556 shell cmd bluetooth_manager disable
+    adb -s emulator-5556 shell cmd bluetooth_manager enable
+
+The emulator app cannot end the connection itself: Android leaves that to
+the device that opened it, which is the lap timer. After its Bluetooth
+restarts, the emulator's device advertises under a different address. The
+lap timer finds it again by name, or by the RaceBox service when the
+advertisement has no name, and records an `address changed` event in the
+session log.
 
 ## Replay a session
 

@@ -118,11 +118,6 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
 
     fun stop() = handler.post { stopNow() }
 
-    /** Disconnects every phone, as if the RaceBox went out of range. Advertising continues, so they can reconnect. */
-    fun dropConnections() = handler.post {
-        for (c in clients.values) server?.cancelConnection(c.device)
-    }
-
     fun release() {
         handler.post {
             stopNow()

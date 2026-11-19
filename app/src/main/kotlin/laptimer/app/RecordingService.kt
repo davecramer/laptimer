@@ -6,7 +6,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -14,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.ParcelUuid
 import android.os.SystemClock
 import laptimer.core.RaceBox
 import laptimer.core.SessionLogWriter
@@ -44,6 +50,17 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     private val recentTimes = ArrayDeque<Long>()
     private var status = RecorderStatus()
     private var lastPublishNanos = 0L
+
+    /** The address [connection] uses. A rescan can replace it. */
+    private var address: String? = null
+    private var scanning = false
+
+    // Android delivers scan results on the main thread.
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            handler.post { onFoundAgain(result.device) }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -101,6 +118,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         status = RecorderStatus(phase = Phase.CONNECTING, deviceName = name, sessionPath = file.absolutePath)
         publish(status, force = true)
 
+        this.address = address
         val adapter = getSystemService(BluetoothManager::class.java).adapter
         connection = RaceBoxConnection(this, adapter.getRemoteDevice(address), handler, this)
             .also { it.connect() }
@@ -108,6 +126,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
 
     private fun finish() {
         val wasRecording = connection != null || log != null
+        stopRescan()
         connection?.close()
         connection = null
         try {
@@ -124,6 +143,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     }
 
     override fun onStreaming() {
+        stopRescan()
         writeEvent("event" to "streaming")
         // The session may have ended: a failed write, or a callback that was
         // already queued when the user pressed Stop.
@@ -173,6 +193,55 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         // Keep trying while the session is open; the RaceBox may only be
         // out of range for a moment.
         handler.postDelayed({ connection?.connect() }, RECONNECT_DELAY_MS)
+        startRescan()
+    }
+
+    /**
+     * Looks for the device under another address while its saved address
+     * is retried. A phone running the RaceBox emulator can advertise under
+     * a different address after its Bluetooth restarts, and connecting to
+     * the saved address then fails every time.
+     *
+     * The scan needs a filter: Android stops a scan without a filter when
+     * the screen turns off.
+     */
+    @SuppressLint("MissingPermission") // MainActivity checks BLUETOOTH_SCAN first.
+    private fun startRescan() {
+        if (scanning) return
+        val scanner = getSystemService(BluetoothManager::class.java).adapter?.bluetoothLeScanner ?: return
+        val name = status.deviceName
+        // Several RaceBoxes can be in range at a track, and the name tells
+        // them apart. Only a device that advertised without a name is
+        // matched by its service.
+        val filter = if (name != null && name != RaceBoxScanner.NO_NAME) {
+            ScanFilter.Builder().setDeviceName(name).build()
+        } else {
+            ScanFilter.Builder().setServiceUuid(ParcelUuid.fromString(RaceBox.SERVICE_UUID)).build()
+        }
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+        scanner.startScan(listOf(filter), settings, scanCallback)
+        scanning = true
+    }
+
+    @SuppressLint("MissingPermission") // MainActivity checks BLUETOOTH_SCAN first.
+    private fun stopRescan() {
+        if (!scanning) return
+        scanning = false
+        getSystemService(BluetoothManager::class.java).adapter?.bluetoothLeScanner?.stopScan(scanCallback)
+    }
+
+    private fun onFoundAgain(device: BluetoothDevice) {
+        // A result can still be queued after the scan stops.
+        if (!scanning || log == null) return
+        // The saved address is already being retried.
+        if (device.address == address) return
+        stopRescan()
+        writeEvent("event" to "address changed", "address" to device.address)
+        // A failed write ends the session.
+        if (log == null) return
+        connection?.close()
+        address = device.address
+        connection = RaceBoxConnection(this, device, handler, this).also { it.connect() }
     }
 
     /**

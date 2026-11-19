@@ -175,9 +175,6 @@ private fun EmulatorScreen() {
                         Button(onClick = { peripheral.start() }) { Text("Start advertising") }
                     } else {
                         OutlinedButton(onClick = { peripheral.stop() }) { Text("Stop") }
-                        OutlinedButton(enabled = ble.clients.isNotEmpty(), onClick = { peripheral.dropConnections() }) {
-                            Text("Drop connection")
-                        }
                     }
                 }
                 Text(
