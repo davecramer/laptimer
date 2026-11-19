@@ -273,6 +273,29 @@ class DrivingSimulator(
         )
     }
 
+    /** Distance along the loop from its first point to the point on it nearest [p], in meters. */
+    fun distanceAlongM(p: LatLon): Double {
+        val n = xs.size
+        val loop = List(n + 1) { proj.toLatLon(Xy(xs[it % n], ys[it % n])) }
+        val snap = snapToPolylines(p, listOf(loop)) ?: return 0.0
+        return distances[snap.segmentIndex] + distanceM(loop[snap.segmentIndex], snap.point)
+    }
+
+    /**
+     * The exact time, from the start of driving, at which the car passes
+     * [distanceM] along the loop on lap [lap], ignoring GPS noise. This is
+     * the reference that lap timing is tested against.
+     */
+    fun passTimeS(lap: Int, distanceM: Double): Double {
+        val d = distanceM.coerceIn(0.0, lengthM)
+        val i = distances.binarySearch(d).let { if (it >= 0) it else -it - 2 }.coerceIn(0, xs.size - 1)
+        val f = if (distances[i + 1] > distances[i]) (d - distances[i]) / (distances[i + 1] - distances[i]) else 0.0
+        // Within one 2 m step the speed changes little, so time is close
+        // to linear in distance there.
+        val ti = times[i] + f * (times[i + 1] - times[i])
+        return lapStartS(lap) + ti / pace(lap)
+    }
+
     /** Standing still at the loop's first point. */
     fun parkedState(): DriveState =
         DriveState(proj.toLatLon(Xy(xs[0], ys[0])), 0.0, normalizeDeg(Math.toDegrees(atan2(xs[1] - xs[0], ys[1] - ys[0]))), 0.0, 0.0, 0.0, 0, 0.0)

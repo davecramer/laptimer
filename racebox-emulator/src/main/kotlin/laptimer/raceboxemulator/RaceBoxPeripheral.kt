@@ -1,6 +1,7 @@
 package laptimer.raceboxemulator
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
@@ -14,12 +15,16 @@ import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.ParcelUuid
 import android.os.SystemClock
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import laptimer.core.GpsFix
@@ -30,6 +35,8 @@ import java.util.UUID
 data class ClientInfo(val address: String, val mtu: Int, val subscribed: Boolean, val framesSent: Long, val framesDropped: Long)
 
 data class PeripheralStatus(
+    /** The user started it and hasn't stopped it. It may still be waiting for Bluetooth. */
+    val enabled: Boolean = false,
     val running: Boolean = false,
     val advertising: Boolean = false,
     val error: String? = null,
@@ -59,6 +66,9 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
     private var server: BluetoothGattServer? = null
     private var tx: BluetoothGattCharacteristic? = null
     private var running = false
+
+    /** True from start() until stop(), including while Bluetooth is off. */
+    private var enabled = false
     private var advertising = false
     private var commands = 0L
     private var lastFrameMs = 0L
@@ -76,17 +86,52 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
 
     private val clients = LinkedHashMap<String, Client>()
 
+    /**
+     * Turning Bluetooth off closes the GATT server and stops advertising
+     * without telling the app, which then looked as if it was still
+     * advertising. Watch for it: shut down cleanly when Bluetooth goes off,
+     * and start again when it comes back if the user hadn't stopped.
+     */
+    private val bluetoothState = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, intent: Intent) {
+            val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            handler.post { onBluetoothState(state) }
+        }
+    }
+
+    init {
+        // System broadcasts still reach a receiver that isn't exported.
+        ContextCompat.registerReceiver(
+            context, bluetoothState, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+    }
+
+    private fun onBluetoothState(state: Int) {
+        when (state) {
+            BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
+                if (running) stopNow()
+                if (enabled) publish(error = "Bluetooth is off. Advertising starts again when it's back on.")
+            }
+            BluetoothAdapter.STATE_ON -> if (enabled && !running) startNow()
+        }
+    }
+
     fun start() = handler.post {
-        if (running) return@post
+        enabled = true
+        startNow()
+    }
+
+    private fun startNow() {
+        if (running) return
         val adapter = manager.adapter
         if (adapter == null || !adapter.isEnabled) {
-            publish(error = "Bluetooth is off.")
-            return@post
+            publish(error = "Bluetooth is off. Advertising starts when it's on.")
+            return
         }
         val s = manager.openGattServer(context, callback)
         if (s == null) {
             publish(error = "Could not open a Bluetooth GATT server.")
-            return@post
+            return
         }
         val service = BluetoothGattService(SERVICE, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         val txc = BluetoothGattCharacteristic(TX, BluetoothGattCharacteristic.PROPERTY_NOTIFY, 0)
@@ -110,16 +155,22 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         if (!s.addService(service)) {
             stopNow()
             publish(error = "Could not add the RaceBox service.")
-            return@post
+            return
         }
         publish(error = null)
         scheduleTick()
     }
 
-    fun stop() = handler.post { stopNow() }
+    fun stop() = handler.post {
+        enabled = false
+        stopNow()
+        publish(error = null)
+    }
 
     fun release() {
+        context.unregisterReceiver(bluetoothState)
         handler.post {
+            enabled = false
             stopNow()
             thread.quitSafely()
         }
@@ -343,6 +394,7 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
     private fun publish(error: String? = _status.value.error) {
         lastPublishMs = System.currentTimeMillis()
         _status.value = PeripheralStatus(
+            enabled = enabled,
             running = running,
             advertising = advertising,
             error = error,

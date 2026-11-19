@@ -3,6 +3,7 @@ package laptimer.app
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import laptimer.core.GpsFix
+import laptimer.core.TimingState
 
 enum class Phase { IDLE, CONNECTING, STREAMING, RECONNECTING }
 
@@ -19,6 +20,14 @@ data class RecorderStatus(
     val disconnects: Int = 0,
     val lastDisconnectReason: String? = null,
     val error: String? = null,
+    /** The track laps are timed on, or null when only recording. */
+    val trackName: String? = null,
+    val timing: TimingState? = null,
+    /**
+     * SystemClock.elapsedRealtimeNanos() when [timing] was last updated by a
+     * fix, so the screen can run the lap clock smoothly between updates.
+     */
+    val timingAtNanos: Long = 0,
 )
 
 /** Status shared between [RecordingService] and the screen. */

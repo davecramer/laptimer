@@ -1,10 +1,14 @@
 package laptimer.replay
 
 import laptimer.core.GpsFix
+import laptimer.core.LapTimer
 import laptimer.core.LogEnd
 import laptimer.core.RaceBox
 import laptimer.core.SessionLogFormat
 import laptimer.core.SessionLogReader
+import laptimer.core.TimingState
+import laptimer.core.Track
+import laptimer.core.TrackJson
 import laptimer.core.UbxStreamParser
 import java.io.File
 
@@ -27,10 +31,19 @@ data class ReplaySummary(
     val medianHorizontalAccuracyM: Double?,
     val maxSpeedMps: Double?,
     val logEnd: LogEnd,
+    /** The track laps were timed on, or null if none was given or stored in the log. */
+    val track: Track? = null,
+    val timing: TimingState? = null,
 )
 
-/** Feeds every fix in a session log to [onFix] and summarizes the session. */
-fun replay(file: File, onFix: (GpsFix) -> Unit = {}): ReplaySummary {
+/**
+ * Feeds every fix in a session log to [onFix] and summarizes the session.
+ *
+ * Laps are timed on [track] if given, otherwise on the track the app
+ * stored in the log when the session started, if any.
+ */
+fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): ReplaySummary {
+    var timer: LapTimer? = track?.let { LapTimer(it) }
     val parser = UbxStreamParser()
     val metadata = linkedMapOf<String, String>()
     val otherFrames = sortedMapOf<String, Long>()
@@ -47,7 +60,13 @@ fun replay(file: File, onFix: (GpsFix) -> Unit = {}): ReplaySummary {
         while (true) {
             val record = reader.next() ?: break
             when (record.type) {
-                SessionLogFormat.TYPE_METADATA -> metadata.putAll(SessionLogReader.parseMetadata(record))
+                SessionLogFormat.TYPE_METADATA -> {
+                    val entries = SessionLogReader.parseMetadata(record)
+                    val stored = entries["track"]
+                    if (stored != null && timer == null) timer = LapTimer(TrackJson.decode(stored))
+                    // The track itself is long; the summary shows its name.
+                    metadata.putAll(entries - "track")
+                }
                 SessionLogFormat.TYPE_DEVICE_BYTES -> {
                     deviceRecords++
                     for (frame in parser.feed(record.payload)) {
@@ -66,6 +85,7 @@ fun replay(file: File, onFix: (GpsFix) -> Unit = {}): ReplaySummary {
                             accuracies.add(fix.horizontalAccuracyM)
                             maxSpeed = maxOf(maxSpeed ?: fix.speedMps, fix.speedMps)
                         }
+                        timer?.feed(fix)
                         onFix(fix)
                     }
                 }
@@ -91,6 +111,8 @@ fun replay(file: File, onFix: (GpsFix) -> Unit = {}): ReplaySummary {
         medianHorizontalAccuracyM = accuracies.sorted().let { if (it.isEmpty()) null else it[it.size / 2] },
         maxSpeedMps = maxSpeed,
         logEnd = end,
+        track = timer?.track,
+        timing = timer?.state,
     )
 }
 

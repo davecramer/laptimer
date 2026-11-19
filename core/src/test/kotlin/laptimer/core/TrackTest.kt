@@ -53,6 +53,13 @@ class TrackTest {
     }
 
     @Test
+    fun compactJsonIsOneLineAndRoundTrips() {
+        val text = TrackJson.encodeCompact(sampleTrack())
+        assertTrue('\n' !in text)
+        assertEquals(sampleTrack(), TrackJson.decode(text))
+    }
+
+    @Test
     fun jsonIgnoresUnknownFieldsAndRejectsNewerFormats() {
         val text = TrackJson.encode(sampleTrack())
         val withExtra = text.replaceFirst("\"name\":", "\"addedLater\": 5, \"name\":")

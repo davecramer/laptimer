@@ -15,15 +15,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -37,6 +39,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -73,7 +76,7 @@ private fun App() {
     // While recording, only the recording screen is shown, so a stray
     // touch cannot open the editor mid-session.
     if (status.phase != Phase.IDLE) {
-        Column(Modifier.padding(16.dp)) { RecordingScreen(status) }
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) { RecordingScreen(status) }
         return
     }
     Column(Modifier.fillMaxSize()) {
@@ -82,7 +85,7 @@ private fun App() {
             Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Tracks") })
         }
         when (tab) {
-            0 -> Column(Modifier.padding(16.dp)) { DevicePicker(status) }
+            0 -> Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) { DevicePicker(status) }
             else -> TracksTab()
         }
     }
@@ -118,13 +121,38 @@ private fun DevicePicker(status: RecorderStatus) {
     }
     DisposableEffect(Unit) { onDispose { scanner.stop() } }
 
+    // Tracks ready for timing. Picking none still records.
+    val tracks = remember { trackStore(context).loadAll().tracks.filter { it.problems().isEmpty() } }
+    var trackId by rememberSaveable { mutableStateOf<String?>(null) }
+    if (trackId != null && tracks.none { it.id == trackId }) trackId = null
+
     Text("Lap Timer", style = MaterialTheme.typography.headlineMedium)
     Spacer(Modifier.height(12.dp))
     status.error?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
     status.sessionPath?.let { path ->
         Text("Last session: ${File(path).name} (${File(path).length() / 1024} KB)")
+        status.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
+            Text("${status.trackName}: ${timing.laps.size} laps", style = MaterialTheme.typography.titleMedium)
+            LapList(timing)
+        }
         Spacer(Modifier.height(12.dp))
     }
+
+    Text("Track", style = MaterialTheme.typography.titleMedium)
+    if (tracks.isEmpty()) Text("No tracks are ready. Add one in the Tracks tab to time laps.")
+    for (option in listOf<laptimer.core.Track?>(null) + tracks) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { trackId = option?.id }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = trackId == option?.id, onClick = null)
+            Text(option?.name ?: "No track: record only", Modifier.padding(start = 8.dp))
+        }
+    }
+    Spacer(Modifier.height(12.dp))
 
     when {
         adapter == null -> Text("This phone has no Bluetooth.")
@@ -144,8 +172,9 @@ private fun DevicePicker(status: RecorderStatus) {
                 },
             ) { Text(if (scanning) "Scanning..." else "Scan for RaceBox") }
             Spacer(Modifier.height(12.dp))
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(devices, key = { it.address }) { d ->
+            // A plain column: the screen scrolls, and a lazy list can't sit inside a scrolling one.
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (d in devices) {
                     Text(
                         "${d.name}   ${d.rssi} dBm",
                         style = MaterialTheme.typography.titleMedium,
@@ -153,7 +182,7 @@ private fun DevicePicker(status: RecorderStatus) {
                             .fillMaxWidth()
                             .clickable {
                                 scanner.stop()
-                                RecordingService.start(context, d.address, d.name)
+                                RecordingService.start(context, d.address, d.name, trackId)
                             }
                             .padding(vertical = 12.dp),
                     )
@@ -167,7 +196,13 @@ private fun DevicePicker(status: RecorderStatus) {
 private fun RecordingScreen(status: RecorderStatus) {
     val context = LocalContext.current
     val fix = status.lastFix
-    val big = MaterialTheme.typography.headlineSmall
+    val timing = status.timing
+    if (timing != null && status.trackName != null) {
+        LiveTiming(status.trackName, timing, status.timingAtNanos, streaming = status.phase == Phase.STREAMING)
+        Spacer(Modifier.height(16.dp))
+    }
+    // With a track, the device details are secondary and shown smaller.
+    val big = if (timing != null) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.headlineSmall
     Text(
         when (status.phase) {
             Phase.CONNECTING -> "Connecting to ${status.deviceName}"

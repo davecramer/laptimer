@@ -114,7 +114,12 @@ object TrackJson {
         encodeDefaults = true
     }
 
+    private val compactJson = Json(json) { prettyPrint = false }
+
     fun encode(track: Track): String = json.encodeToString(TrackFile.serializer(), TrackFile(FORMAT, track))
+
+    /** The same as [encode] on one line, for a session log's metadata. [decode] reads both. */
+    fun encodeCompact(track: Track): String = compactJson.encodeToString(TrackFile.serializer(), TrackFile(FORMAT, track))
 
     /** Throws [IllegalArgumentException] if the text is not a track file this version can read. */
     fun decode(text: String): Track {

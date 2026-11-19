@@ -171,7 +171,7 @@ private fun EmulatorScreen() {
             }
             else -> {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!ble.running) {
+                    if (!ble.enabled) {
                         Button(onClick = { peripheral.start() }) { Text("Start advertising") }
                     } else {
                         OutlinedButton(onClick = { peripheral.stop() }) { Text("Stop") }
@@ -179,7 +179,8 @@ private fun EmulatorScreen() {
                 }
                 Text(
                     when {
-                        !ble.running -> "Not advertising."
+                        !ble.enabled -> "Not advertising."
+                        !ble.running -> "Waiting for Bluetooth."
                         !ble.advertising -> "Starting..."
                         ble.clients.isEmpty() -> "Advertising as ${adapter.name ?: "this device"}. Scan from the lap timer."
                         else -> "Connected."

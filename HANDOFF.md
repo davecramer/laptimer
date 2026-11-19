@@ -87,8 +87,9 @@ on `Medium_Phone_API_37.0` (API 37) and the RaceBox emulator app on
   stop the app and start it again:
   `adb -s emulator-5556 shell am force-stop laptimer.raceboxemulator`.
 - After Bluetooth restarts on the emulator's device, the RaceBox emulator
-  app still shows "Advertising" but is not. Tap Stop, then "Start
-  advertising".
+  app used to show "Advertising" when it was not. Fixed after this session:
+  it now watches the Bluetooth state and starts advertising again on its
+  own.
 - The apps can be driven from a computer with `adb shell input tap` and
   read with `adb shell uiautomator dump`. Button positions move when a
   status line appears or wraps, so read the positions from a fresh dump

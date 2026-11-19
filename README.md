@@ -24,12 +24,20 @@ OpenStreetMap.
   - `OsmApi.kt`: finds tracks in OpenStreetMap through the Overpass API
     (`highway=raceway` ways joined where they share a node, and
     `leisure=track` areas), and finds places by name through Nominatim.
+  - `LapTiming.kt`: the lap timer. It finds where the path between two
+    consecutive fixes crosses a timing line in the counting direction and
+    interpolates the crossing time, using the receiver's clock. Laps with a
+    GPS gap of more than 2 seconds are flagged and don't count as bests.
+  - `DrivingSimulator.kt`: simulated laps for testing, with exact pass
+    times to test lap timing against.
 - `replay`: command-line tool that replays a session log through the same
-  parser and decoder the app uses, prints a summary, and can export fixes
-  to CSV.
+  parser, decoder and lap timer the app uses, prints a summary and the
+  laps, and can export fixes to CSV.
 - `app`: the Android app (Android 12 and later). It scans for a RaceBox,
   records in a foreground service, reconnects after a dropout, and shows
-  live fix data. The Tracks tab finds a track on the map and places the
+  live fix data. With a track picked on the Record tab, it times laps
+  live: a large lap clock, last and best lap, and sector times against the
+  best for each sector. The Tracks tab finds a track on the map and places the
   start/finish line, sector lines, and a separate finish line for point to
   point tracks. Building it needs the Android SDK; `local.properties`
   points at it.
@@ -111,9 +119,9 @@ The emulator shows the exact time of each simulated lap, measured where
 its loop starts, for comparing with the lap timer. "Lose GPS for 5 s"
 tests fix loss.
 
-To test reconnecting, turn Bluetooth off on the emulator's device, turn it
-on again, then tap Stop and "Start advertising" in the RaceBox Emulator.
-From a computer:
+To test reconnecting, turn Bluetooth off on the emulator's device and on
+again. The RaceBox Emulator starts advertising again by itself when
+Bluetooth comes back, unless you tapped Stop. From a computer:
 
     adb -s emulator-5556 shell cmd bluetooth_manager disable
     adb -s emulator-5556 shell cmd bluetooth_manager enable
@@ -125,6 +133,21 @@ lap timer finds it again by name, or by the RaceBox service when the
 advertisement has no name, and records an `address changed` event in the
 session log.
 
+## Timing laps
+
+1. Add the track in the Tracks tab and place at least the start/finish
+   line.
+2. On the Record tab, pick the track, then scan and tap the RaceBox.
+3. The first crossing of the start/finish line starts lap 1. A crossing
+   less than 10 seconds into a lap is ignored, so creeping over the line
+   in the pits doesn't start a new lap.
+
+For a quick test, add Laguna Seca in the lap timer, pick it on the Record
+tab, and have the RaceBox Emulator drive Laguna Seca.
+
+The session file stores the whole track, so the replay tool can time a
+session again later, even after the track is edited or deleted.
+
 ## Replay a session
 
     ./gradlew -q :replay:run --args="path/to/session.ltlog --csv fixes.csv"
@@ -132,7 +155,14 @@ session log.
 The summary shows the update rate measured from the receiver's own clock,
 gaps longer than 1.5 times the median interval, checksum errors, the median
 horizontal accuracy, and whether the file ended cleanly or was cut off
-during a write.
+during a write. If the session was recorded with a track, it also lists
+each lap with its sector times, and the best sectors.
+
+To time a session on a different track, or after editing the lines, pass
+a track file. Tracks are in the app's private folder; copy one off with:
+
+    adb exec-out run-as laptimer.app cat files/tracks/<id>.json > track.json
+    ./gradlew -q :replay:run --args="path/to/session.ltlog --track $PWD/track.json"
 
 ## RaceBox protocol
 
@@ -163,6 +193,8 @@ document from RaceBox.
 1. Connect to the RaceBox, record raw data, replay it. Built; not yet
    tested with a real phone and RaceBox.
 2. Import tracks from OpenStreetMap; draw start/finish and sector lines.
-3. Lap timing, sectors, live screen.
+   Built; tested on virtual devices.
+3. Lap timing, sectors, live screen. Built; tested against the driving
+   simulator, not yet on a device.
 4. Predictive delta, best and optimal lap.
 5. Session list, lap table, CSV and VBO export.

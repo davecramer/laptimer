@@ -21,8 +21,10 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.ParcelUuid
 import android.os.SystemClock
+import laptimer.core.LapTimer
 import laptimer.core.RaceBox
 import laptimer.core.SessionLogWriter
+import laptimer.core.TrackJson
 import laptimer.core.UbxStreamParser
 import java.io.File
 import java.io.IOException
@@ -47,6 +49,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     private var connection: RaceBoxConnection? = null
     private var log: SessionLogWriter? = null
     private var parser = UbxStreamParser()
+    private var lapTimer: LapTimer? = null
     private val recentTimes = ArrayDeque<Long>()
     private var status = RecorderStatus()
     private var lastPublishNanos = 0L
@@ -73,7 +76,8 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
                 )
                 val address = intent.getStringExtra(EXTRA_ADDRESS)
                 val name = intent.getStringExtra(EXTRA_NAME) ?: address
-                handler.post { if (address != null) begin(address, name ?: "RaceBox") }
+                val trackId = intent.getStringExtra(EXTRA_TRACK_ID)
+                handler.post { if (address != null) begin(address, name ?: "RaceBox", trackId) }
             }
             ACTION_STOP -> handler.post { finish() }
         }
@@ -90,8 +94,10 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     }
 
     @SuppressLint("MissingPermission") // MainActivity checks BLUETOOTH_CONNECT first.
-    private fun begin(address: String, name: String) {
+    private fun begin(address: String, name: String, trackId: String?) {
         if (connection != null) return
+        val track = trackId?.let { id -> trackStore(this).loadAll().tracks.find { it.id == id } }
+            ?.takeIf { it.problems().isEmpty() }
         val file = try {
             newSessionFile()
         } catch (e: IOException) {
@@ -113,9 +119,19 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
             "phone" to "${Build.MANUFACTURER} ${Build.MODEL}",
             "android" to Build.VERSION.RELEASE,
         )
+        // The whole track goes in the log, so the session can be timed
+        // again later even if the track is edited or deleted.
+        if (track != null) writeEvent("trackName" to track.name, "track" to TrackJson.encodeCompact(track))
         parser = UbxStreamParser()
+        lapTimer = track?.let { LapTimer(it) }
         recentTimes.clear()
-        status = RecorderStatus(phase = Phase.CONNECTING, deviceName = name, sessionPath = file.absolutePath)
+        status = RecorderStatus(
+            phase = Phase.CONNECTING,
+            deviceName = name,
+            sessionPath = file.absolutePath,
+            trackName = track?.name,
+            timing = lapTimer?.state,
+        )
         publish(status, force = true)
 
         this.address = address
@@ -135,8 +151,13 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
             status = status.copy(error = "Closing the session file failed: ${e.message}")
         }
         log = null
+        lapTimer = null
         if (wasRecording) {
-            publish(RecorderStatus(sessionPath = status.sessionPath, error = status.error), force = true)
+            // Keep the laps on screen after the session ends.
+            publish(
+                RecorderStatus(sessionPath = status.sessionPath, error = status.error, trackName = status.trackName, timing = status.timing),
+                force = true,
+            )
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -164,12 +185,25 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         }
         var fixes = status.fixes
         var lastFix = status.lastFix
+        var lapFinished = false
         for (frame in parser.feed(data)) {
             val fix = RaceBox.decodeFix(frame) ?: continue
             fixes++
             lastFix = fix
             recentTimes.addLast(fix.gpsTimeOfWeekMs)
             while (recentTimes.size > RATE_WINDOW) recentTimes.removeFirst()
+            for (lap in lapTimer?.feed(fix).orEmpty()) {
+                lapFinished = true
+                // Timing can be redone from the raw data; this is for reading the log.
+                writeEvent(
+                    "event" to "lap",
+                    "lap" to lap.number.toString(),
+                    "timeS" to "%.3f".format(java.util.Locale.ROOT, lap.timeS),
+                    "sectorsS" to lap.sectorTimesS.joinToString(",") { it?.let { s -> "%.3f".format(java.util.Locale.ROOT, s) } ?: "" },
+                    "gap" to lap.hadGap.toString(),
+                )
+                if (log == null) return
+            }
         }
         status = status.copy(
             lastFix = lastFix,
@@ -177,8 +211,11 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
             fixRateHz = fixRate(),
             checksumErrors = parser.checksumErrors,
             bytesRecorded = status.bytesRecorded + data.size,
+            timing = lapTimer?.state ?: status.timing,
+            timingAtNanos = if (lapTimer != null) timeNanos else status.timingAtNanos,
         )
-        publish(status)
+        // A finished lap shows at once, not up to 200 ms later.
+        publish(status, force = lapFinished)
     }
 
     override fun onDisconnected(reason: String) {
@@ -307,6 +344,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         private const val ACTION_STOP = "laptimer.app.STOP"
         private const val EXTRA_ADDRESS = "address"
         private const val EXTRA_NAME = "name"
+        private const val EXTRA_TRACK_ID = "trackId"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
         private const val RECONNECT_DELAY_MS = 2_000L
@@ -321,12 +359,14 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         fun sessionDirectory(context: Context): File =
             File(context.getExternalFilesDir(null) ?: context.filesDir, "sessions")
 
-        fun start(context: Context, address: String, name: String) {
+        /** Starts a session. With [trackId], laps are timed on that track. */
+        fun start(context: Context, address: String, name: String, trackId: String?) {
             context.startForegroundService(
                 Intent(context, RecordingService::class.java)
                     .setAction(ACTION_START)
                     .putExtra(EXTRA_ADDRESS, address)
-                    .putExtra(EXTRA_NAME, name),
+                    .putExtra(EXTRA_NAME, name)
+                    .putExtra(EXTRA_TRACK_ID, trackId),
             )
         }
 

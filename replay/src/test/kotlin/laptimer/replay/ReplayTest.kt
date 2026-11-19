@@ -1,7 +1,18 @@
 package laptimer.replay
 
+import laptimer.core.DriverProfile
+import laptimer.core.DrivingSimulator
+import laptimer.core.LatLon
 import laptimer.core.LogEnd
+import laptimer.core.RaceBox
+import laptimer.core.RaceBoxFeed
+import laptimer.core.SessionLogWriter
 import laptimer.core.SyntheticSession
+import laptimer.core.TimingLine
+import laptimer.core.Track
+import laptimer.core.TrackJson
+import laptimer.core.TrackLoop
+import laptimer.core.bearingDeg
 import java.io.File
 import java.nio.file.Files
 import kotlin.math.PI
@@ -71,5 +82,39 @@ class ReplayTest {
         val week = 7L * 24 * 3600 * 1000
         assertEquals(40, towDifferenceMs(week - 20, 20))
         assertEquals(40, towDifferenceMs(100, 140))
+    }
+
+    @Test
+    fun `laps are timed on the track stored in the session`() {
+        val sim = DrivingSimulator(TrackLoop.testOval(LatLon(36.5843, -121.7535)), DriverProfile(positionNoiseM = 0.0), seed = 2)
+        val a = sim.stateAt(sim.passTimeS(0, 300.0)).position
+        val b = sim.stateAt(sim.passTimeS(0, 301.0)).position
+        val track = Track(name = "Oval", start = TimingLine.across(a, bearingDeg(a, b), 25.0))
+        val file = File(dir, "oval.ltlog")
+        val startMs = 1_795_000_000_000L
+        SessionLogWriter(file).use { log ->
+            // As RecordingService writes it.
+            log.writeMetadata(0, mapOf("device" to "emulator", "trackName" to track.name, "track" to TrackJson.encodeCompact(track)))
+            var k = 0
+            while (k * 0.04 < sim.lapStartS(4)) {
+                val frame = RaceBox.encodeFrame(RaceBoxFeed.fix(sim.stateAt(k * 0.04), startMs + k * 40L))
+                // 20-byte pieces, as at the default Bluetooth MTU.
+                frame.toList().chunked(20).forEach { log.writeDeviceBytes(k * 40_000_000L, it.toByteArray()) }
+                k++
+            }
+        }
+
+        val summary = replay(file)
+        val laps = assertNotNull(summary.timing).laps
+        assertEquals(3, laps.size)
+        for (lap in laps) {
+            val j = lap.number - 1
+            assertEquals(sim.passTimeS(j + 1, 300.0) - sim.passTimeS(j, 300.0), lap.timeS, 0.002)
+        }
+        val report = format(summary)
+        assertTrue(report.contains("track: Oval"), report)
+        assertTrue(report.contains("(best)"), report)
+        // The stored track isn't dumped into the summary.
+        assertTrue(!report.contains("\"format\""), report)
     }
 }
