@@ -1,10 +1,16 @@
 package laptimer.app
 
 import android.os.SystemClock
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -14,6 +20,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -24,6 +31,7 @@ import laptimer.core.Lap
 import laptimer.core.TimingState
 import laptimer.core.formatDelta
 import laptimer.core.formatLapTime
+import kotlin.math.abs
 
 /** Faster than the best: the usual lap-timer green. */
 private val FASTER = Color(0xFF2E7D32)
@@ -77,15 +85,79 @@ fun LiveTiming(trackName: String, timing: TimingState, timingAtNanos: Long, stre
         }
         if (timing.currentLapHasGap) Text("GPS gap this lap: it won't count as a best", color = SLOWER)
 
+        if (!holdLast) Delta(timing)
+
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             LabeledTime("Last", last?.let { formatLapTime(it.timeS) }, last?.let { lapColor(it, best) })
             LabeledTime("Best", best?.let { formatLapTime(it.timeS) }, null)
-            if (last != null && best != null && last != best && !last.hadGap) {
-                LabeledTime("Gap", formatDelta(last.timeS - best.timeS), SLOWER)
-            }
+            // With one sector, the optimal lap is just the best lap.
+            if (timing.bestSectorsS.size > 1) LabeledTime("Optimal", timing.optimalLapS?.let { formatLapTime(it) }, null)
+        }
+        if (last != null && best != null && last != best && !last.hadGap) {
+            Text("Last lap ${formatDelta(last.timeS - best.timeS)} off the best", color = SLOWER)
         }
 
         if (timing.bestSectorsS.size > 1) SectorRow(timing, last, holdLast)
+    }
+}
+
+/** The bar reaches the edge at this many seconds, either way from the middle. */
+private const val DELTA_BAR_FULL_S = 2.0
+private val DELTA_BAR_HEIGHT = 14.dp
+
+/**
+ * The predictive delta: how far ahead (green, negative) or behind (red)
+ * of the reference lap the car is at this point of the lap, as a number
+ * and a bar from the middle: left for ahead, right for behind.
+ */
+@Composable
+private fun Delta(timing: TimingState) {
+    val ref = timing.referenceLapS ?: return
+    val d = timing.deltaS
+    val color = when {
+        d == null -> Color.Gray
+        d <= 0 -> FASTER
+        else -> SLOWER
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text(
+            // Hundredths are enough to read at a glance.
+            d?.let { formatDelta(it).dropLast(1) } ?: "--.--",
+            fontSize = 48.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            color = color,
+        )
+        Column {
+            timing.predictedLapS?.let { Text("Predicted ${formatLapTime(it, decimals = 1)}", fontFamily = FontFamily.Monospace) }
+            Text(
+                "vs ${formatLapTime(ref)}" + if (timing.referenceFromThisSession) " (best today)" else " (your best)",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+    BoxWithConstraints(
+        Modifier
+            .fillMaxWidth()
+            .height(DELTA_BAR_HEIGHT),
+    ) {
+        val half = maxWidth / 2
+        val fraction = ((d ?: 0.0) / DELTA_BAR_FULL_S).coerceIn(-1.0, 1.0).toFloat()
+        val barWidth = half * abs(fraction)
+        // Ahead grows left from the middle, behind grows right.
+        val start = if (fraction < 0) half - barWidth else half
+        Box(
+            Modifier
+                .offset(x = start)
+                .size(barWidth, DELTA_BAR_HEIGHT)
+                .background(color),
+        )
+        Box(
+            Modifier
+                .offset(x = half - 1.dp)
+                .size(2.dp, DELTA_BAR_HEIGHT)
+                .background(Color.Gray),
+        )
     }
 }
 
@@ -160,6 +232,9 @@ fun LapList(timing: TimingState) {
                 fontFamily = FontFamily.Monospace,
                 color = if (lap == best) FASTER else Color.Unspecified,
             )
+        }
+        if (timing.bestSectorsS.size > 1) {
+            timing.optimalLapS?.let { Text("Optimal ${formatLapTime(it)} from the best sectors", fontFamily = FontFamily.Monospace) }
         }
     }
 }

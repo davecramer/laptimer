@@ -28,6 +28,11 @@ OpenStreetMap.
     consecutive fixes crosses a timing line in the counting direction and
     interpolates the crossing time, using the receiver's clock. Laps with a
     GPS gap of more than 2 seconds are flagged and don't count as bests.
+  - `ReferenceLap.kt`: the predictive delta. The fastest lap's path is kept
+    as a reference, and the current position is matched to the nearest
+    point on it, searching only the stretch the car can have reached since
+    the last match. Matching by position rather than distance driven keeps
+    the delta right when the car takes a different line.
   - `DrivingSimulator.kt`: simulated laps for testing, with exact pass
     times to test lap timing against.
 - `replay`: command-line tool that replays a session log through the same
@@ -36,8 +41,10 @@ OpenStreetMap.
 - `app`: the Android app (Android 12 and later). It scans for a RaceBox,
   records in a foreground service, reconnects after a dropout, and shows
   live fix data. With a track picked on the Record tab, it times laps
-  live: a large lap clock, last and best lap, and sector times against the
-  best for each sector. The Tracks tab finds a track on the map and places the
+  live: a large lap clock, the predictive delta with a bar and a predicted
+  lap time, last, best and optimal lap, and sector times against the best
+  for each sector. The fastest lap on each track is saved, so the delta
+  works from the first lap of the next session. The Tracks tab finds a track on the map and places the
   start/finish line, sector lines, and a separate finish line for point to
   point tracks. Building it needs the Android SDK; `local.properties`
   points at it.
@@ -141,6 +148,11 @@ session log.
 3. The first crossing of the start/finish line starts lap 1. A crossing
    less than 10 seconds into a lap is ignored, so creeping over the line
    in the pits doesn't start a new lap.
+4. The delta compares against the faster of today's best lap and the best
+   lap saved for the track. Negative (green) is ahead. Moving the
+   start/finish line or changing the track type discards the saved lap,
+   because its times no longer apply. Laps with a GPS gap never become the
+   reference.
 
 For a quick test, add Laguna Seca in the lap timer, pick it on the Record
 tab, and have the RaceBox Emulator drive Laguna Seca.
@@ -196,5 +208,6 @@ document from RaceBox.
    Built; tested on virtual devices.
 3. Lap timing, sectors, live screen. Built; tested against the driving
    simulator, not yet on a device.
-4. Predictive delta, best and optimal lap.
+4. Predictive delta, best and optimal lap. Built; tested against the
+   driving simulator, not yet on a device.
 5. Session list, lap table, CSV and VBO export.

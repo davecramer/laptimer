@@ -23,6 +23,7 @@ import android.os.ParcelUuid
 import android.os.SystemClock
 import laptimer.core.LapTimer
 import laptimer.core.RaceBox
+import laptimer.core.ReferenceStore
 import laptimer.core.SessionLogWriter
 import laptimer.core.TrackJson
 import laptimer.core.UbxStreamParser
@@ -50,6 +51,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     private var log: SessionLogWriter? = null
     private var parser = UbxStreamParser()
     private var lapTimer: LapTimer? = null
+    private val references: ReferenceStore by lazy { referenceStore(this) }
     private val recentTimes = ArrayDeque<Long>()
     private var status = RecorderStatus()
     private var lastPublishNanos = 0L
@@ -123,7 +125,8 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         // again later even if the track is edited or deleted.
         if (track != null) writeEvent("trackName" to track.name, "track" to TrackJson.encodeCompact(track))
         parser = UbxStreamParser()
-        lapTimer = track?.let { LapTimer(it) }
+        // The track's best lap from earlier sessions, so the delta works from the first lap.
+        lapTimer = track?.let { LapTimer(it, initialReference = references.load(it)) }
         recentTimes.clear()
         status = RecorderStatus(
             phase = Phase.CONNECTING,
@@ -203,6 +206,15 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
                     "gap" to lap.hadGap.toString(),
                 )
                 if (log == null) return
+            }
+        }
+        // A new fastest lap becomes the track's reference for later sessions too.
+        lapTimer?.takeNewReference()?.let { ref ->
+            try {
+                references.save(ref)
+            } catch (e: IOException) {
+                // Timing carries on; only the saved best is lost.
+                status = status.copy(error = "Saving the best lap failed: ${e.message}")
             }
         }
         status = status.copy(

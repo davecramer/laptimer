@@ -34,11 +34,35 @@ data class TimingState(
     val currentLapHasGap: Boolean = false,
     /** Best time for each sector, over laps without gaps. */
     val bestSectorsS: List<Double?> = emptyList(),
+    /** The lap time of the reference the delta compares against, or null if there is none yet. */
+    val referenceLapS: Double? = null,
+    /** True if the reference is a lap from this session; false if it was stored from an earlier one. */
+    val referenceFromThisSession: Boolean = false,
+    /**
+     * The current lap's time minus the reference lap's time at the same
+     * place on track. Negative is ahead. Null with no reference, or when
+     * the car is away from the reference path, for example in the pits.
+     */
+    val deltaS: Double? = null,
 ) {
     val lastLap: Lap? get() = laps.lastOrNull()
 
     /** The fastest lap without a GPS gap. */
     val bestLap: Lap? get() = laps.filter { !it.hadGap }.minByOrNull { it.timeS }
+
+    /**
+     * The sum of the best sector times: the lap you would drive by putting
+     * your best sectors together. Null until every sector has a time.
+     */
+    val optimalLapS: Double? get() =
+        if (bestSectorsS.isNotEmpty() && bestSectorsS.all { it != null }) bestSectorsS.sumOf { it!! } else null
+
+    /** The reference lap time plus the delta: where this lap is heading. */
+    val predictedLapS: Double? get() {
+        val ref = referenceLapS ?: return null
+        val d = deltaS ?: return null
+        return ref + d
+    }
 
     /** Time into the current lap, or null when no lap is running. */
     val currentLapS: Double? get() {
@@ -69,6 +93,12 @@ class LapTimer(
     val minLapS: Double = 10.0,
     /** Fixes further apart than this are a gap: no crossing is detected across it. */
     val maxGapS: Double = 2.0,
+    /**
+     * The lap to compare against at first, usually the track's best from
+     * an earlier session. Ignored if it doesn't fit [track]. A faster lap
+     * without a GPS gap replaces it.
+     */
+    initialReference: ReferenceLap? = null,
 ) {
     private val start = track.start
     private val finish = if (track.kind == TrackKind.POINT_TO_POINT) track.finish else track.start
@@ -97,6 +127,25 @@ class LapTimer(
     private var nextSector = 0
     private var lapHasGap = false
     private var nowS: Double? = null
+    private var lastUtcNanos: Long? = null
+
+    /** The current lap's path so far: time into the lap, and position. */
+    private val path = ArrayList<Pair<Double, Xy>>()
+    private var pathFull = false
+
+    /** The lap the delta compares against. */
+    var reference: ReferenceLap? = initialReference?.takeIf { it.fits(track) }
+        private set
+    private var referenceFromThisSession = false
+    private var tracker: DeltaTracker? = reference?.let { DeltaTracker(it, proj) }
+    private var newReference: ReferenceLap? = null
+    private var deltaS: Double? = null
+
+    /**
+     * Returns the reference set by a lap of this session since the last
+     * call, for saving, then forgets it. Null if there is none.
+     */
+    fun takeNewReference(): ReferenceLap? = newReference.also { newReference = null }
 
     /** The state after the fixes so far. */
     var state = TimingState(bestSectorsS = List(sectorCount) { null })
@@ -119,6 +168,7 @@ class LapTimer(
         lastTimeMs = timeMs
         val t = timeMs / 1000.0
         nowS = t
+        fix.utcEpochNanos?.let { lastUtcNanos = it }
 
         if (!fix.fixOk || !fix.positionValid) {
             publish()
@@ -134,9 +184,15 @@ class LapTimer(
                 lapHasGap = true
             } else {
                 for ((s, what) in crossings(p0, p)) {
-                    handleCrossing(what, t0 + s * (t - t0))?.let { finished += it }
+                    val at = Xy(p0.x + s * (p.x - p0.x), p0.y + s * (p.y - p0.y))
+                    handleCrossing(what, t0 + s * (t - t0), at)?.let { finished += it }
                 }
             }
+        }
+        val begun = lapStartS
+        if (begun != null) {
+            if (path.size < MAX_PATH_POINTS) path += (t - begun) to p else pathFull = true
+            deltaS = tracker?.referenceTimeAt(p, t - begun)?.let { (t - begun) - it }
         }
         publish()
         return finished
@@ -178,26 +234,27 @@ class LapTimer(
         return if (s >= 0.0 && s < 1.0 && u in 0.0..1.0) s else null
     }
 
-    private fun handleCrossing(what: Crossed, t: Double): Lap? {
+    private fun handleCrossing(what: Crossed, t: Double, at: Xy): Lap? {
         val circuit = track.kind == TrackKind.CIRCUIT
         when (what) {
             Crossed.Start -> {
                 val begun = lapStartS
                 if (begun == null) {
-                    beginLap(t)
+                    beginLap(t, at)
                     return null
                 }
                 // On a point-to-point track, a run in progress ignores the start line.
                 if (!circuit || t - begun < minLapS) return null
-                val lap = endLap(t)
-                beginLap(t)
+                val lap = endLap(t, at)
+                beginLap(t, at)
                 return lap
             }
             Crossed.Finish -> {
                 val begun = lapStartS ?: return null
                 if (t - begun < minLapS) return null
-                val lap = endLap(t)
+                val lap = endLap(t, at)
                 lapStartS = null
+                deltaS = null
                 return lap
             }
             is Crossed.Sector -> {
@@ -211,14 +268,19 @@ class LapTimer(
         }
     }
 
-    private fun beginLap(t: Double) {
+    private fun beginLap(t: Double, at: Xy) {
         lapStartS = t
         splits = arrayOfNulls(sectorCount - 1)
         nextSector = 0
         lapHasGap = false
+        path.clear()
+        path += 0.0 to at
+        pathFull = false
+        tracker?.reset()
+        deltaS = 0.0.takeIf { tracker != null }
     }
 
-    private fun endLap(t: Double): Lap {
+    private fun endLap(t: Double, at: Xy): Lap {
         val begun = lapStartS!!
         val total = t - begun
         // Sector boundaries: 0, each split, then the lap time.
@@ -230,6 +292,23 @@ class LapTimer(
         }
         val lap = Lap(laps.size + 1, begun, total, sectors, lapHasGap)
         laps += lap
+        path += total to at
+        val ref = reference
+        if (!lapHasGap && !pathFull && (ref == null || total < ref.lapTimeS)) {
+            val r = ReferenceLap(
+                trackId = track.id,
+                kind = track.kind,
+                start = track.start,
+                finish = track.finish.takeIf { track.kind == TrackKind.POINT_TO_POINT },
+                lapTimeS = total,
+                recordedUtc = lastUtcNanos?.let { java.time.Instant.ofEpochSecond(0, it).toString() },
+                points = path.map { (pt, xy) -> proj.toLatLon(xy).let { RefPoint(it.lat, it.lon, pt) } },
+            )
+            reference = r
+            referenceFromThisSession = true
+            tracker = DeltaTracker(r, proj)
+            newReference = r
+        }
         return lap
     }
 
@@ -243,6 +322,9 @@ class LapTimer(
             currentSplitsS = if (lapStartS == null) emptyList() else splits.toList(),
             currentLapHasGap = lapHasGap,
             bestSectorsS = (0 until sectorCount).map { i -> clean.mapNotNull { it.sectorTimesS[i] }.minOrNull() },
+            referenceLapS = reference?.lapTimeS,
+            referenceFromThisSession = referenceFromThisSession,
+            deltaS = if (lapStartS == null) null else deltaS,
         )
     }
 
@@ -250,6 +332,9 @@ class LapTimer(
 
     companion object {
         private const val WEEK_MS = 7L * 24 * 3600 * 1000
+
+        /** An hour at 25 Hz. A lap that long, say parked with the timer running, is not kept as a reference. */
+        private const val MAX_PATH_POINTS = 90_000
     }
 }
 

@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import laptimer.core.OSM_ATTRIBUTION
 import laptimer.core.OsmClient
+import laptimer.core.ReferenceStore
 import laptimer.core.Track
 import laptimer.core.TrackKind
 import laptimer.core.TrackStore
@@ -52,6 +53,9 @@ private const val USER_AGENT = "laptimer-android/0.1"
 private val osmClient by lazy { OsmClient(UrlConnectionTransport(USER_AGENT)) }
 
 fun trackStore(context: android.content.Context) = TrackStore(File(context.filesDir, "tracks"))
+
+/** Each track's fastest lap, for the predictive delta. */
+fun referenceStore(context: android.content.Context) = ReferenceStore(File(context.filesDir, "references"))
 
 @Composable
 fun TracksTab() {
@@ -116,6 +120,7 @@ private fun trackSummary(t: Track): String {
 
 @Composable
 private fun TrackEditorScreen(initial: Track, store: TrackStore, onClose: () -> Unit) {
+    val context = LocalContext.current
     val editor = remember(initial.id) { TrackEditor(initial, osmClient) }
     val scope = rememberCoroutineScope()
     var confirmDiscard by remember { mutableStateOf(false) }
@@ -273,6 +278,7 @@ private fun TrackEditorScreen(initial: Track, store: TrackStore, onClose: () -> 
             confirmButton = {
                 TextButton(onClick = {
                     store.delete(track.id)
+                    referenceStore(context).delete(track.id)
                     onClose()
                 }) { Text("Delete") }
             },
