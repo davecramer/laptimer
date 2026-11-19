@@ -1,7 +1,9 @@
 package laptimer.replay
 
 import laptimer.core.GpsFix
+import laptimer.core.SessionExport
 import laptimer.core.TrackJson
+import laptimer.core.summarizeSession
 import laptimer.core.formatLapTime
 import java.io.File
 import java.io.IOException
@@ -10,9 +12,12 @@ import java.time.Instant
 import kotlin.system.exitProcess
 
 private const val USAGE = """usage: replay <session.ltlog> [--csv <out.csv>] [--track <track.json>]
+              [--laps-csv <laps.csv>] [--vbo <out.vbo>]
 
 Reads a recorded session, decodes every GPS fix, and prints a summary.
-With --csv, also writes one row per fix.
+With --csv, also writes one row per fix. --laps-csv writes one row per
+lap, and --vbo writes a Racelogic VBO file for Circuit Tools; both are the
+same as the app's exports.
 
 Laps are timed on the track stored in the session, if the app recorded
 with one. --track times them on a track file instead, such as one copied
@@ -22,11 +27,15 @@ fun main(args: Array<String>) {
     val positional = mutableListOf<String>()
     var csvPath: String? = null
     var trackPath: String? = null
+    var lapsCsvPath: String? = null
+    var vboPath: String? = null
     var i = 0
     while (i < args.size) {
         when (args[i]) {
             "--csv" -> csvPath = args.getOrNull(++i) ?: usage()
             "--track" -> trackPath = args.getOrNull(++i) ?: usage()
+            "--laps-csv" -> lapsCsvPath = args.getOrNull(++i) ?: usage()
+            "--vbo" -> vboPath = args.getOrNull(++i) ?: usage()
             "-h", "--help" -> usage(0)
             else -> positional.add(args[i])
         }
@@ -59,6 +68,18 @@ fun main(args: Array<String>) {
         csv?.close()
     }
     print(format(summary))
+
+    if (lapsCsvPath != null || vboPath != null) {
+        val file = File(positional[0])
+        try {
+            val session = summarizeSession(file, track)
+            lapsCsvPath?.let { path -> File(path).bufferedWriter().use { SessionExport.writeLapsCsv(session, it) } }
+            vboPath?.let { path -> File(path).bufferedWriter().use { SessionExport.writeVbo(file, session, it) } }
+        } catch (e: IOException) {
+            System.err.println("Export failed: ${e.message}")
+            exitProcess(1)
+        }
+    }
 }
 
 private fun usage(status: Int = 2): Nothing {

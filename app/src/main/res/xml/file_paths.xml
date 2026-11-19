@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Exports are written to the cache, then shared. -->
+    <cache-path name="exports" path="exports/" />
+    <!-- Session logs, for "Share session file". RecordingService keeps them in
+         external app storage, or internal storage if that is missing. -->
+    <external-files-path name="sessions" path="sessions/" />
+    <files-path name="sessions-internal" path="sessions/" />
+</paths>

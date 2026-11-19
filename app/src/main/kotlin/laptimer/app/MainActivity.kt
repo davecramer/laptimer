@@ -82,10 +82,12 @@ private fun App() {
     Column(Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = tab) {
             Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Record") })
-            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Tracks") })
+            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Sessions") })
+            Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Tracks") })
         }
         when (tab) {
             0 -> Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) { DevicePicker(status) }
+            1 -> SessionsTab()
             else -> TracksTab()
         }
     }

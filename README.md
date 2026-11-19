@@ -33,6 +33,9 @@ OpenStreetMap.
     point on it, searching only the stretch the car can have reached since
     the last match. Matching by position rather than distance driven keeps
     the delta right when the car takes a different line.
+  - `Sessions.kt`: reads a session log, summarizes it with its laps, and
+    exports it as a laps CSV, a data CSV (one row per fix, with lap number
+    and time into the lap), or a Racelogic VBO file.
   - `DrivingSimulator.kt`: simulated laps for testing, with exact pass
     times to test lap timing against.
 - `replay`: command-line tool that replays a session log through the same
@@ -44,7 +47,9 @@ OpenStreetMap.
   live: a large lap clock, the predictive delta with a bar and a predicted
   lap time, last, best and optimal lap, and sector times against the best
   for each sector. The fastest lap on each track is saved, so the delta
-  works from the first lap of the next session. The Tracks tab finds a track on the map and places the
+  works from the first lap of the next session. The Sessions tab lists
+  recordings with a lap table each, can time a session on a different
+  track, and shares exports through Android's share sheet. The Tracks tab finds a track on the map and places the
   start/finish line, sector lines, and a separate finish line for point to
   point tracks. Building it needs the Android SDK; `local.properties`
   points at it.
@@ -160,6 +165,24 @@ tab, and have the RaceBox Emulator drive Laguna Seca.
 The session file stores the whole track, so the replay tool can time a
 session again later, even after the track is edited or deleted.
 
+## Exporting
+
+On the Sessions tab, open a session and pick an export. Android's share
+sheet then offers Drive, email, Files and other apps.
+
+- Laps CSV: one row per lap with sector times and the gap to the best.
+- Data CSV: one row per GPS fix, with the lap number and time into the lap.
+- VBO: Racelogic's text format, for Circuit Tools and other analysis
+  software. Positions are in minutes of arc with longitude positive to the
+  west, time is UTC, and lines end in CR LF. This follows two independent
+  open-source VBO writers; it has not been opened in Circuit Tools yet. The
+  file leaves out the `[laptiming]` section, because its exact syntax could
+  not be confirmed, so set the start/finish line in Circuit Tools.
+- Share session file: the raw `.ltlog`, which the replay tool reads.
+
+The replay tool writes the same exports: `--laps-csv laps.csv` and
+`--vbo out.vbo`.
+
 ## Replay a session
 
     ./gradlew -q :replay:run --args="path/to/session.ltlog --csv fixes.csv"
@@ -210,4 +233,5 @@ document from RaceBox.
    simulator, not yet on a device.
 4. Predictive delta, best and optimal lap. Built; tested against the
    driving simulator, not yet on a device.
-5. Session list, lap table, CSV and VBO export.
+5. Session list, lap table, CSV and VBO export. Built; the exports are
+   tested against the simulator, the VBO file not yet in Circuit Tools.
