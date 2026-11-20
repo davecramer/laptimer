@@ -127,6 +127,7 @@ private fun DevicePicker(status: RecorderStatus) {
     val tracks = remember { trackStore(context).loadAll().tracks.filter { it.problems().isEmpty() } }
     var trackId by rememberSaveable { mutableStateOf<String?>(null) }
     var obdTarget by remember { mutableStateOf(ObdPrefs.load(context)) }
+    var canProfile by remember { mutableStateOf(ObdPrefs.loadCanProfile(context)) }
     if (trackId != null && tracks.none { it.id == trackId }) trackId = null
 
     Text("Lap Timer", style = MaterialTheme.typography.headlineMedium)
@@ -167,6 +168,7 @@ private fun DevicePicker(status: RecorderStatus) {
         }) { Text("Turn on Bluetooth") }
         else -> {
             ObdPicker(obdTarget) { obdTarget = it }
+            if (obdTarget != null) ReadModePicker(canProfile) { canProfile = it }
             Spacer(Modifier.height(16.dp))
             Text("RaceBox", style = MaterialTheme.typography.titleMedium)
             Button(
@@ -188,7 +190,7 @@ private fun DevicePicker(status: RecorderStatus) {
                             .fillMaxWidth()
                             .clickable {
                                 scanner.stop()
-                                RecordingService.start(context, d.address, d.name, trackId, obdTarget)
+                                RecordingService.start(context, d.address, d.name, trackId, obdTarget, canProfile?.id)
                             }
                             .padding(vertical = 12.dp),
                     )
@@ -208,7 +210,8 @@ private fun RecordingScreen(status: RecorderStatus) {
         Spacer(Modifier.height(16.dp))
     }
     status.obd?.let {
-        EnginePanel(it)
+        val profile = status.canProfile
+        if (profile != null) CanPanel(it, profile) else EnginePanel(it)
         Spacer(Modifier.height(16.dp))
     }
     // With a track, the device details are secondary and shown smaller.

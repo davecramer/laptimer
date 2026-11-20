@@ -105,6 +105,9 @@ internal fun format(s: ReplaySummary): String = buildString {
     if (s.obdReadings.isNotEmpty()) {
         appendLine("OBD readings: " + s.obdReadings.entries.joinToString(", ") { "${it.key.label} ${it.value}" })
     }
+    if (s.canValues.isNotEmpty()) {
+        appendLine("CAN values: " + s.canValues.entries.joinToString(", ") { "${it.key} ${it.value}" })
+    }
     val timing = s.timing ?: return@buildString
     appendLine()
     appendLine("track: ${s.track?.name}")

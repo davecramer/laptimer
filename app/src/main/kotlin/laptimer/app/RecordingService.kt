@@ -21,6 +21,9 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.ParcelUuid
 import android.os.SystemClock
+import laptimer.core.CAN_PROFILE_KEY
+import laptimer.core.CanProfile
+import laptimer.core.CanProfiles
 import laptimer.core.LapTimer
 import laptimer.core.RaceBox
 import laptimer.core.ReferenceStore
@@ -87,7 +90,8 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
                         transport = ObdTransport.valueOf(intent.getStringExtra(EXTRA_OBD_TRANSPORT) ?: ObdTransport.BLE.name),
                     )
                 }
-                handler.post { if (address != null) begin(address, name ?: "RaceBox", trackId, obdTarget) }
+                val canProfile = intent.getStringExtra(EXTRA_CAN_PROFILE)?.let { id -> CanProfiles.ALL.find { it.id == id } }
+                handler.post { if (address != null) begin(address, name ?: "RaceBox", trackId, obdTarget, canProfile) }
             }
             ACTION_STOP -> handler.post { finish() }
         }
@@ -104,7 +108,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     }
 
     @SuppressLint("MissingPermission") // MainActivity checks BLUETOOTH_CONNECT first.
-    private fun begin(address: String, name: String, trackId: String?, obdTarget: ObdTarget?) {
+    private fun begin(address: String, name: String, trackId: String?, obdTarget: ObdTarget?, canProfile: CanProfile?) {
         if (connection != null) return
         val track = trackId?.let { id -> trackStore(this).loadAll().tracks.find { it.id == id } }
             ?.takeIf { it.problems().isEmpty() }
@@ -153,12 +157,15 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         // The OBD adapter connects on its own schedule; the session doesn't wait for it.
         if (obdTarget != null) {
             writeEvent("obdAdapter" to obdTarget.name, "obdAddress" to obdTarget.address, "obdTransport" to obdTarget.transport.name)
+            // With a profile the adapter's bytes are CAN monitor lines; the profile
+            // goes in the log so the session decodes with the same definitions later.
+            if (canProfile != null) writeEvent("canProfileName" to canProfile.name, CAN_PROFILE_KEY to canProfile.toJson())
             if (log == null) return
-            obd = ObdController(this, obdTarget, handler, obdLog) { s, important ->
+            obd = ObdController(this, obdTarget, handler, obdLog, canProfile) { s, important ->
                 status = status.copy(obd = s)
                 publish(status, force = important)
             }.also {
-                status = status.copy(obd = it.status)
+                status = status.copy(obd = it.status, canProfile = canProfile)
                 it.start()
             }
         }
@@ -400,6 +407,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         private const val EXTRA_OBD_ADDRESS = "obdAddress"
         private const val EXTRA_OBD_NAME = "obdName"
         private const val EXTRA_OBD_TRANSPORT = "obdTransport"
+        private const val EXTRA_CAN_PROFILE = "canProfile"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
         private const val RECONNECT_DELAY_MS = 2_000L
@@ -418,7 +426,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
          * Starts a session. With [trackId], laps are timed on that track;
          * with [obd], engine data is read from that adapter too.
          */
-        fun start(context: Context, address: String, name: String, trackId: String?, obd: ObdTarget? = null) {
+        fun start(context: Context, address: String, name: String, trackId: String?, obd: ObdTarget? = null, canProfileId: String? = null) {
             val intent = Intent(context, RecordingService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_ADDRESS, address)
@@ -428,6 +436,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
                 intent.putExtra(EXTRA_OBD_ADDRESS, obd.address)
                     .putExtra(EXTRA_OBD_NAME, obd.name)
                     .putExtra(EXTRA_OBD_TRANSPORT, obd.transport.name)
+                    .putExtra(EXTRA_CAN_PROFILE, canProfileId)
             }
             context.startForegroundService(intent)
         }

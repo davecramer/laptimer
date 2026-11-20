@@ -36,6 +36,8 @@ data class ReplaySummary(
     val timing: TimingState? = null,
     /** OBD readings per channel. */
     val obdReadings: Map<laptimer.core.ObdChannel, Long> = emptyMap(),
+    /** CAN signal values per signal name, when the session stored a CAN profile. */
+    val canValues: Map<String, Long> = emptyMap(),
 )
 
 /**
@@ -59,6 +61,10 @@ fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): Repl
     var previousTow: Long? = null
     val obdSplitter = laptimer.core.ElmReplySplitter()
     val obdCounts = sortedMapOf<laptimer.core.ObdChannel, Long>()
+    // With a CAN profile, the adapter's bytes are monitor lines, not OBD replies.
+    var canSignals: Map<Int, List<laptimer.core.CanSignal>>? = null
+    val canCounts = linkedMapOf<String, Long>()
+    val canLine = StringBuilder()
 
     val end = SessionLogReader(file).use { reader ->
         while (true) {
@@ -66,10 +72,13 @@ fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): Repl
             when (record.type) {
                 SessionLogFormat.TYPE_METADATA -> {
                     val entries = SessionLogReader.parseMetadata(record)
+                    entries[laptimer.core.CAN_PROFILE_KEY]?.let { json ->
+                        canSignals = runCatching { laptimer.core.CanProfile.fromJson(json) }.getOrNull()?.signals?.groupBy { it.id }
+                    }
                     val stored = entries["track"]
                     if (stored != null && timer == null) timer = LapTimer(TrackJson.decode(stored))
                     // The track itself is long; the summary shows its name.
-                    metadata.putAll(entries - "track")
+                    metadata.putAll(entries - "track" - laptimer.core.CAN_PROFILE_KEY)
                 }
                 SessionLogFormat.TYPE_DEVICE_BYTES -> {
                     deviceRecords++
@@ -93,9 +102,28 @@ fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): Repl
                         onFix(fix)
                     }
                 }
-                SessionLogFormat.TYPE_OBD_RECEIVED -> for (lines in obdSplitter.feed(record.payload)) {
-                    for (s in laptimer.core.ObdReplies.samples(lines, record.timeNanos)) {
-                        obdCounts[s.channel] = (obdCounts[s.channel] ?: 0) + 1
+                SessionLogFormat.TYPE_OBD_RECEIVED -> {
+                    val signals = canSignals
+                    if (signals == null) {
+                        for (lines in obdSplitter.feed(record.payload)) {
+                            for (s in laptimer.core.ObdReplies.samples(lines, record.timeNanos)) {
+                                obdCounts[s.channel] = (obdCounts[s.channel] ?: 0) + 1
+                            }
+                        }
+                    } else {
+                        for (b in record.payload) {
+                            val c = (b.toInt() and 0xFF).toChar()
+                            if (c == '\r' || c == '\n' || c == '>') {
+                                laptimer.core.CanMonitorLines.parse(canLine.toString().trim())?.let { f ->
+                                    for (s in signals[f.id].orEmpty()) {
+                                        if (s.decode(f.data) != null) canCounts[s.name] = (canCounts[s.name] ?: 0) + 1
+                                    }
+                                }
+                                canLine.setLength(0)
+                            } else if (canLine.length < 256) {
+                                canLine.append(c)
+                            }
+                        }
                     }
                 }
             }
@@ -123,6 +151,7 @@ fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): Repl
         track = timer?.track,
         timing = timer?.state,
         obdReadings = obdCounts,
+        canValues = canCounts,
     )
 }
 

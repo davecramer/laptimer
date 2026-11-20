@@ -99,6 +99,14 @@ class DriveController {
     fun engine(): laptimer.core.EngineState =
         laptimer.core.EngineModel.state(lastState ?: EMPTY_STATE, (System.currentTimeMillis() - startedMs) / 1000.0)
 
+    /** The 718's CAN messages for the car's latest state, for the emulated OBDLink. */
+    @Synchronized
+    fun canFrames(nowMs: Long): List<laptimer.core.CanFrame> {
+        val state = lastState ?: EMPTY_STATE
+        val engine = laptimer.core.EngineModel.state(state, (System.currentTimeMillis() - startedMs) / 1000.0)
+        return laptimer.core.CanEmulation.frames(laptimer.core.CanProfiles.PORSCHE_718, state, engine, nowMs / 40)
+    }
+
     /** The receiver loses its fix for [seconds], as under a bridge. */
     @Synchronized
     fun loseFix(seconds: Int) {

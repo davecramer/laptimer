@@ -68,7 +68,7 @@ object Emulator {
     private var peripheral: RaceBoxPeripheral? = null
 
     fun peripheral(context: Context): RaceBoxPeripheral =
-        peripheral ?: RaceBoxPeripheral(context.applicationContext, drive::fixAt, drive::engine) { drive.ignitionOn }
+        peripheral ?: RaceBoxPeripheral(context.applicationContext, drive::fixAt, drive::engine, drive::canFrames) { drive.ignitionOn }
             .also { peripheral = it }
 
     /** A generic name: OSM services ask clients to identify the software, not the person. */
@@ -193,7 +193,12 @@ private fun EmulatorScreen() {
                             (if (c.subscribed) "streaming, ${c.framesSent} frames sent" else "waiting for notifications") +
                             if (c.framesDropped > 0) ", ${c.framesDropped} backlogs dropped" else "",
                     )
-                    if (c.obdSubscribed) Text("   OBD adapter in use: ${c.obdCommands} commands answered")
+                    if (c.obdSubscribed) {
+                        Text(
+                            "   OBD adapter in use: ${c.obdCommands} commands answered" +
+                                if (c.canMonitoring) ", sending Porsche 718 CAN messages" else "",
+                        )
+                    }
                 }
                 var ignition by remember { mutableStateOf(Emulator.drive.ignitionOn) }
                 TextButton(onClick = {

@@ -117,4 +117,18 @@ class ReplayTest {
         // The stored track isn't dumped into the summary.
         assertTrue(!report.contains("\"format\""), report)
     }
+
+    @Test
+    fun `a CAN session counts CAN values and no OBD readings`() {
+        val sim = DrivingSimulator(TrackLoop.testOval(LatLon(36.5843, -121.7535)), DriverProfile(positionNoiseM = 0.0), seed = 2)
+        val file = File(dir, "can.ltlog")
+        laptimer.core.SimulatedSession.write(file, sim, 20.0, track = null, can = laptimer.core.CanProfiles.PORSCHE_718)
+        val summary = replay(file)
+        assertTrue(summary.obdReadings.isEmpty(), summary.obdReadings.toString())
+        assertTrue(summary.canValues.getValue("RPM") > 300)
+        val report = format(summary)
+        assertTrue(report.contains("CAN values: "), report)
+        // The stored profile isn't dumped into the summary.
+        assertTrue(!report.contains("\"signals\""), report)
+    }
 }

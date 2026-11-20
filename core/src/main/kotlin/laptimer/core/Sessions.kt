@@ -7,29 +7,59 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+/** The metadata key under which a session stores the CAN profile it was recorded with. */
+const val CAN_PROFILE_KEY = "canProfile"
+
 /**
  * Reads a session log in order: metadata records go to [onMetadata], OBD
- * readings to [onObd], and each decoded GPS fix to [onFix]. Returns how
- * the file ended.
+ * readings to [onObd], CAN signal values to [onCan], and each decoded GPS
+ * fix to [onFix]. Returns how the file ended.
+ *
+ * The adapter's bytes are OBD replies unless the session stored a CAN
+ * profile, in which case they are monitor lines decoded with it.
  */
 fun readSession(
     file: File,
     onMetadata: (Map<String, String>) -> Unit = {},
     onObd: (ObdSample) -> Unit = {},
+    onCan: (CanSample) -> Unit = {},
     onFix: (GpsFix) -> Unit,
 ): LogEnd {
     val parser = UbxStreamParser()
     val obd = ElmReplySplitter()
+    var can: Map<Int, List<CanSignal>>? = null
+    val canLine = StringBuilder()
     return SessionLogReader(file).use { reader ->
         while (true) {
             val record = reader.next() ?: break
             when (record.type) {
-                SessionLogFormat.TYPE_METADATA -> onMetadata(SessionLogReader.parseMetadata(record))
+                SessionLogFormat.TYPE_METADATA -> {
+                    val m = SessionLogReader.parseMetadata(record)
+                    m[CAN_PROFILE_KEY]?.let { json ->
+                        can = runCatching { CanProfile.fromJson(json) }.getOrNull()?.signals?.groupBy { it.id }
+                    }
+                    onMetadata(m)
+                }
                 SessionLogFormat.TYPE_DEVICE_BYTES -> for (frame in parser.feed(record.payload)) {
                     RaceBox.decodeFix(frame)?.let(onFix)
                 }
-                SessionLogFormat.TYPE_OBD_RECEIVED -> for (lines in obd.feed(record.payload)) {
-                    ObdReplies.samples(lines, record.timeNanos).forEach(onObd)
+                SessionLogFormat.TYPE_OBD_RECEIVED -> {
+                    val signals = can
+                    if (signals == null) {
+                        for (lines in obd.feed(record.payload)) ObdReplies.samples(lines, record.timeNanos).forEach(onObd)
+                    } else {
+                        for (b in record.payload) {
+                            val c = (b.toInt() and 0xFF).toChar()
+                            if (c == '\r' || c == '\n' || c == '>') {
+                                CanMonitorLines.parse(canLine.toString().trim())?.let { f ->
+                                    for (s in signals[f.id].orEmpty()) s.decode(f.data)?.let { onCan(CanSample(s, it, record.timeNanos)) }
+                                }
+                                canLine.setLength(0)
+                            } else if (canLine.length < 256) {
+                                canLine.append(c)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -54,6 +84,11 @@ data class SessionSummary(
     /** The engine readings the session has, empty if no OBD adapter was used. */
     val obdChannels: Set<ObdChannel> = emptySet(),
     val obdReadings: Long = 0,
+    /** The CAN profile the session was recorded with, if any. */
+    val canProfile: CanProfile? = null,
+    /** Names of the profile's signals that had at least one value. */
+    val canSignalsSeen: Set<String> = emptySet(),
+    val canValues: Long = 0,
 )
 
 /**
@@ -70,13 +105,21 @@ fun summarizeSession(file: File, track: Track? = null): SessionSummary {
     var elapsedMs = 0L
     val obdChannels = mutableSetOf<ObdChannel>()
     var obdReadings = 0L
+    var canProfile: CanProfile? = null
+    val canSeen = mutableSetOf<String>()
+    var canValues = 0L
     val end = readSession(
         file,
         onObd = { s ->
             obdChannels += s.channel
             obdReadings++
         },
+        onCan = { s ->
+            canSeen += s.signal.name
+            canValues++
+        },
         onMetadata = { m ->
+            m[CAN_PROFILE_KEY]?.let { canProfile = runCatching { CanProfile.fromJson(it) }.getOrNull() }
             m["startUtc"]?.let { s -> startUtc = runCatching { Instant.parse(s) }.getOrNull() }
             m["device"]?.let { device = it }
             val stored = m["track"]
@@ -105,6 +148,9 @@ fun summarizeSession(file: File, track: Track? = null): SessionSummary {
         logEnd = end,
         obdChannels = obdChannels,
         obdReadings = obdReadings,
+        canProfile = canProfile,
+        canSignalsSeen = canSeen,
+        canValues = canValues,
     )
 }
 
@@ -150,9 +196,12 @@ object SessionExport {
      * columns hold the latest reading received before the fix, so a
      * reading is at most one polling round old.
      */
-    fun writeDataCsv(file: File, track: Track?, out: Writer) {
-        out.write(DATA_CSV_HEADER + "\n")
-        forEachTimedFix(file, track) { fix, lap, lapTimeS, obd ->
+    fun writeDataCsv(file: File, track: Track?, out: Writer, canProfile: CanProfile? = null) {
+        // One column per CAN signal, as the latest value before each fix.
+        val canSignals = canProfile?.signals.orEmpty()
+        out.write(DATA_CSV_HEADER + canSignals.joinToString("") { ",can_" + columnName(it.name) } + "\n")
+        val can = HashMap<String, Double>()
+        forEachTimedFix(file, track, onCan = { can[it.signal.name] = it.value }) { fix, lap, lapTimeS, obd ->
             out.write(
                 listOf(
                     fix.utcEpochNanos?.let { Instant.ofEpochSecond(0, it).toString() } ?: "",
@@ -175,7 +224,8 @@ object SessionExport {
                     "%.2f".format(Locale.ROOT, fix.rotationZDps),
                 ).joinToString(",") + "," +
                     CSV_OBD.joinToString(",") { (c, _) -> obd[c]?.let { "%.2f".format(Locale.ROOT, it) } ?: "" } + "," +
-                    (obd.boostKpa?.let { "%.1f".format(Locale.ROOT, it) } ?: "") + "\n",
+                    (obd.boostKpa?.let { "%.1f".format(Locale.ROOT, it) } ?: "") +
+                    canSignals.joinToString("") { s -> "," + (can[s.name]?.let { "%.3f".format(Locale.ROOT, it) } ?: "") } + "\n",
             )
         }
     }
@@ -199,8 +249,10 @@ object SessionExport {
         // Engine readings become user channels, each named in the header and given a unit.
         val engine = VBO_OBD.filter { it.channel in summary.obdChannels }
         val boost = ObdChannel.MANIFOLD_PRESSURE in summary.obdChannels && ObdChannel.BAROMETRIC_PRESSURE in summary.obdChannels
-        val userNames = engine.map { it.name } + if (boost) listOf("Boost") else emptyList()
-        val userUnits = engine.map { it.unit } + if (boost) listOf("kPa") else emptyList()
+        // CAN signals that had values, after the OBD ones.
+        val canSignals = summary.canProfile?.signals.orEmpty().filter { it.name in summary.canSignalsSeen }
+        val userNames = engine.map { it.name } + (if (boost) listOf("Boost") else emptyList()) + canSignals.map { columnName(it.name) }
+        val userUnits = engine.map { it.unit } + (if (boost) listOf("kPa") else emptyList()) + canSignals.map { asciiUnit(it.unit) }
         line("File created on " + DateTimeFormatter.ofPattern("dd/MM/yyyy 'at' HH:mm:ss", Locale.ROOT).withZone(ZoneOffset.UTC).format(createdAt))
         line()
         line("[header]")
@@ -222,15 +274,22 @@ object SessionExport {
         line()
         line("[data]")
         var obd = ObdValues()
-        readSession(file, onObd = { obd = obd.with(it) }) { fix ->
+        val can = HashMap<String, Double>()
+        readSession(file, onObd = { obd = obd.with(it) }, onCan = { can[it.signal.name] = it.value }) { fix ->
             val utc = fix.utcEpochNanos
             if (!fix.fixOk || !fix.positionValid || utc == null) return@readSession
             // A channel not read yet is written as 0: every row needs every column.
             val user = engine.map { "%.2f".format(Locale.ROOT, obd[it.channel] ?: 0.0) } +
-                if (boost) listOf("%.1f".format(Locale.ROOT, obd.boostKpa ?: 0.0)) else emptyList()
+                (if (boost) listOf("%.1f".format(Locale.ROOT, obd.boostKpa ?: 0.0)) else emptyList()) +
+                canSignals.map { "%.3f".format(Locale.ROOT, can[it.name] ?: 0.0) }
             line((listOf(vboRow(fix, utc)) + user).joinToString(" "))
         }
     }
+
+    /** Letters, digits and underscores only: VBO columns are separated by spaces. */
+    private fun columnName(name: String) = name.replace(Regex("[^A-Za-z0-9_]"), "_")
+
+    private fun asciiUnit(unit: String) = unit.replace("°", "").replace("²", "2")
 
     private class VboChannel(val channel: ObdChannel, val name: String, val unit: String)
 
@@ -268,12 +327,18 @@ object SessionExport {
     }
 
     /** Each fix with its lap and time into the lap (null outside a lap) and the latest engine readings. */
-    private fun forEachTimedFix(file: File, track: Track?, onFix: (GpsFix, Int?, Double?, ObdValues) -> Unit) {
+    private fun forEachTimedFix(
+        file: File,
+        track: Track?,
+        onCan: (CanSample) -> Unit = {},
+        onFix: (GpsFix, Int?, Double?, ObdValues) -> Unit,
+    ) {
         var timer: LapTimer? = track?.let { LapTimer(it) }
         var obd = ObdValues()
         readSession(
             file,
             onObd = { obd = obd.with(it) },
+            onCan = onCan,
             onMetadata = { m ->
                 val stored = m["track"]
                 if (stored != null && timer == null) timer = runCatching { LapTimer(TrackJson.decode(stored)) }.getOrNull()

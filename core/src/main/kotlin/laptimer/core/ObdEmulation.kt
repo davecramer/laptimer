@@ -13,6 +13,8 @@ data class EngineState(
     val intakeC: Double,
     val oilC: Double,
     val barometricKpa: Double = 101.0,
+    /** 1 to 6; 0 when stopped. */
+    val gear: Int = 0,
 )
 
 /**
@@ -29,8 +31,8 @@ object EngineModel {
 
     fun state(drive: DriveState, secondsSinceStart: Double): EngineState {
         val kmh = drive.speedMps * 3.6
-        val gear = GEARS.firstOrNull { kmh / it * 1000 <= SHIFT_RPM } ?: GEARS.last()
-        val rpm = maxOf(IDLE_RPM, kmh / gear * 1000)
+        val gearIndex = GEARS.indexOfFirst { kmh / it * 1000 <= SHIFT_RPM }.let { if (it < 0) GEARS.size - 1 else it }
+        val rpm = maxOf(IDLE_RPM, kmh / GEARS[gearIndex] * 1000)
         val throttle = when {
             kmh < 1 -> 0.0
             drive.longitudinalG > 0.03 -> (drive.longitudinalG / 0.4 * 100).coerceIn(20.0, 100.0)
@@ -53,6 +55,7 @@ object EngineModel {
             coolantC = 70 + 20 * warm,
             intakeC = 25 + (manifold - 101).coerceAtLeast(0.0) * 0.15,
             oilC = 80 + 25 * warm,
+            gear = if (kmh < 1) 0 else gearIndex + 1,
         )
     }
 }
@@ -66,30 +69,67 @@ class Elm327Emulator(
     private val engine: () -> EngineState?,
     /** The readings the emulated car supports. */
     private val supported: Set<ObdChannel> = ObdChannel.entries.toSet(),
+    /** Act as an OBDLink: answer STI and the STN commands for CAN monitoring. */
+    private val stn: Boolean = false,
+    /** The CAN messages on the emulated bus at a time in milliseconds, for monitor mode. */
+    private val canFrames: ((Long) -> List<CanFrame>)? = null,
 ) {
     private var echo = true
     private var spaces = true
     private var headers = false
     private var searched = false
 
+    /** Monitoring the CAN bus: [monitorOutput] streams messages until the next command. */
+    var monitoring = false
+        private set
+    private var filters: MutableSet<Int>? = null
+    private val passFilters = mutableSetOf<Int>()
+
     /** Set false to act as a car with the ignition off. */
     var carOn = true
 
-    /** The reply to one command (without its "\r"), ending with the prompt. */
+    /**
+     * The reply to one command (without its "\r"), ending with the prompt.
+     * While monitoring, any input stops it instead, and only the prompt
+     * comes back. A monitor command's reply has no prompt: messages
+     * follow from [monitorOutput].
+     */
     fun reply(commandText: String): String {
+        if (monitoring) {
+            monitoring = false
+            return "\r>"
+        }
         val cmd = commandText.replace(" ", "").trim().uppercase()
         // The chip echoes a command as it arrives, before acting on it, so "ATE0" itself is echoed.
         val echoed = echo
+        val echoText = if (echoed) "$commandText\r" else ""
+        if (cmd == "ATMA" || (stn && (cmd == "STMA" || cmd == "STM"))) {
+            monitoring = true
+            filters = if (cmd == "STM") passFilters.toMutableSet() else null
+            return echoText
+        }
         val lines = respond(cmd)
-        val body = lines.joinToString("\r") + "\r\r>"
-        return if (echoed) "$commandText\r$body" else body
+        return echoText + lines.joinToString("\r") + "\r\r>"
+    }
+
+    /**
+     * Messages on the bus at [nowMs], one line each as the adapter prints
+     * them with headers on and spaces off, or "" when not monitoring.
+     */
+    fun monitorOutput(nowMs: Long): String {
+        if (!monitoring) return ""
+        val frames = canFrames?.invoke(nowMs) ?: return ""
+        val pass = filters
+        return frames.filter { pass == null || it.id in pass }.joinToString("") { f ->
+            "%03X".format(f.id) + f.data.joinToString(if (spaces) " " else "") { "%02X".format(it) } + "\r"
+        }
     }
 
     private fun respond(cmd: String): List<String> {
         if (cmd.isEmpty()) return emptyList()
         if (cmd.startsWith("AT")) return at(cmd.substring(2))
         // OBDLink's own commands; a plain ELM327 doesn't know them.
-        if (cmd.startsWith("ST")) return listOf("?")
+        if (cmd.startsWith("ST")) return if (stn) stnCommand(cmd) else listOf("?")
         if (cmd.length < 4 || !cmd.all { it.isDigit() || it in 'A'..'F' }) return listOf("?")
         if (!cmd.startsWith("01")) return listOf("NO DATA")
         val pid = cmd.substring(2, 4).toInt(16)
@@ -121,9 +161,22 @@ class Elm327Emulator(
         cmd == "H0" -> ok { headers = false }
         cmd == "H1" -> ok { headers = true }
         cmd == "L0" || cmd == "L1" -> ok {}
+        cmd == "CAF0" || cmd == "CAF1" || cmd == "CSM0" || cmd == "CSM1" -> ok {}
         cmd.startsWith("AT") && cmd.length == 3 -> ok {}
         cmd.startsWith("SP") -> ok { searched = false }
         cmd == "DPN" -> listOf(if (searched) "A6" else "0")
+        else -> listOf("?")
+    }
+
+    private fun stnCommand(cmd: String): List<String> = when {
+        cmd == "STI" -> listOf("STN2255 v5.10.3")
+        cmd == "STFAC" -> ok { passFilters.clear() }
+        cmd.startsWith("STFAP") -> {
+            // "STFAP086,7FF": pattern and mask. Only exact 11-bit matches are emulated.
+            val parts = cmd.removePrefix("STFAP").split(",")
+            val id = parts.getOrNull(0)?.toIntOrNull(16)
+            if (id == null) listOf("?") else ok { passFilters += id }
+        }
         else -> listOf("?")
     }
 
@@ -160,5 +213,65 @@ class Elm327Emulator(
         for (p in pids) if (p in page + 1..page + 32) mask = mask or (1L shl (32 - (p - page)))
         if (pids.any { it > page + 32 }) mask = mask or 1L
         return listOf((mask shr 24).toInt() and 0xFF, (mask shr 16).toInt() and 0xFF, (mask shr 8).toInt() and 0xFF, mask.toInt() and 0xFF)
+    }
+}
+
+/**
+ * The CAN messages a profile's car would send, made from simulated
+ * driving. Each signal is filled by what it measures; signals without a
+ * meaning are left at zero.
+ */
+object CanEmulation {
+    /** Messages holding only these change slowly and are sent once a second, as on a real car. */
+    private val SLOW = setOf(CanMeaning.COOLANT_TEMP, CanMeaning.OIL_TEMP, CanMeaning.INTAKE_TEMP, CanMeaning.FUEL_LEVEL, CanMeaning.OUTSIDE_TEMP)
+
+    /** Steering ratio and wheelbase of a typical sports car. */
+    private const val STEERING_RATIO = 14.0
+    private const val WHEELBASE_M = 2.48
+
+    /**
+     * Messages for one 40 ms step. Fast messages come every step; slow
+     * ones on every 25th, so once a second.
+     */
+    fun frames(profile: CanProfile, drive: DriveState, engine: EngineState, step: Long): List<CanFrame> =
+        profile.signals.groupBy { it.id }.mapNotNull { (id, signals) ->
+            val slow = signals.all { it.meaning in SLOW }
+            if (slow && step % 25 != 0L) return@mapNotNull null
+            val data = ByteArray(8)
+            for (s in signals) s.encode(value(s.meaning, drive, engine), data)
+            CanFrame(id, data)
+        }
+
+    private fun value(meaning: CanMeaning?, d: DriveState, e: EngineState): Double {
+        val kmh = d.speedMps * 3.6
+        // Positive lateral g is a right turn: the right wheels are on the inside and turn slower.
+        val spread = 0.02 * d.lateralG
+        val yawRad = Math.toRadians(d.yawRateDps)
+        val curvature = if (d.speedMps > 1) yawRad / d.speedMps else 0.0
+        val braking = (-d.longitudinalG).coerceAtLeast(0.0)
+        return when (meaning) {
+            null -> 0.0
+            CanMeaning.RPM -> e.rpm
+            CanMeaning.THROTTLE -> e.throttlePercent
+            CanMeaning.SPEED -> kmh
+            CanMeaning.WHEEL_SPEED_FL, CanMeaning.WHEEL_SPEED_RL -> kmh * (1 + spread)
+            CanMeaning.WHEEL_SPEED_FR, CanMeaning.WHEEL_SPEED_RR -> kmh * (1 - spread)
+            CanMeaning.STEERING_ANGLE -> Math.toDegrees(kotlin.math.abs(kotlin.math.atan(WHEELBASE_M * curvature))) * STEERING_RATIO
+            CanMeaning.STEERING_SPEED -> 0.0
+            CanMeaning.YAW_RATE -> kotlin.math.abs(d.yawRateDps)
+            CanMeaning.LATERAL_G -> d.lateralG
+            CanMeaning.LONGITUDINAL_ACCEL -> d.longitudinalG * 9.80665
+            CanMeaning.BRAKE_PRESSURE -> if (braking > 0.05) braking * 110 else 0.0
+            CanMeaning.BRAKE_LIGHT -> if (braking > 0.05) 1.0 else 0.0
+            CanMeaning.CLUTCH -> 0.0
+            CanMeaning.GEAR -> e.gear.toDouble()
+            CanMeaning.OIL_PRESSURE -> (1.5 + e.rpm / 1500).coerceAtMost(6.0)
+            CanMeaning.MANIFOLD_PRESSURE -> e.manifoldKpa / 100
+            CanMeaning.COOLANT_TEMP -> e.coolantC
+            CanMeaning.OIL_TEMP -> e.oilC
+            CanMeaning.INTAKE_TEMP -> e.intakeC
+            CanMeaning.FUEL_LEVEL -> 50.0
+            CanMeaning.OUTSIDE_TEMP -> 18.0
+        }
     }
 }

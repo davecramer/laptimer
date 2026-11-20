@@ -30,6 +30,8 @@ data class RecorderStatus(
     val timingAtNanos: Long = 0,
     /** The OBD adapter's state, or null when the session doesn't use one. */
     val obd: ObdStatus? = null,
+    /** The CAN profile the adapter reads with, or null for standard OBD-II. */
+    val canProfile: laptimer.core.CanProfile? = null,
 )
 
 /** Status shared between [RecordingService] and the screen. */

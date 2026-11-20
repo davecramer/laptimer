@@ -40,6 +40,11 @@ OpenStreetMap.
     oil temperature and barometric pressure about once a second.
   - `ObdEmulation.kt`: an emulated ELM327 adapter and a simple engine model,
     for the RaceBox emulator app and tests.
+  - `Can.kt`, `CanMonitor.kt`: a car's own CAN messages through an OBDLink.
+    Signal definitions as in a DBC file (with a DBC reader), a built-in
+    profile for the Porsche 718, and the monitor that sets the adapter to
+    listen silently, surveys the bus, filters to the profile's messages,
+    and decodes them.
   - `Sessions.kt`: reads a session log, summarizes it with its laps, and
     exports it as a laps CSV, a data CSV (one row per fix, with lap number
     and time into the lap), or a Racelogic VBO file.
@@ -204,6 +209,48 @@ To test without a car, the RaceBox Emulator also acts as a BLE OBD
 adapter, with readings that follow the simulated driving. Pick it under
 "OBD adapter" after "Find BLE adapters". Its "Ignition" button tests a car
 that stops answering.
+
+## CAN bus (Porsche 718)
+
+An OBDLink (MX+, LX or CX) can listen to the car's CAN bus instead of
+asking standard OBD questions. That gives the car's own signals at their
+native rate, typically 25 to 100 times a second: steering angle, yaw rate,
+lateral and longitudinal acceleration, all four wheel speeds, brake
+pressure, throttle, RPM, gear, clutch, oil pressure, manifold pressure,
+temperatures and fuel level.
+
+The built-in profile is for the Porsche 718 (Cayman, GT4, Clubsport). Its
+definitions come from
+https://planetkris.com/porsche-718-cayman-can-bus-track-day-data/, where
+they were reverse engineered. On the 718 these messages are not expected
+on the factory OBD port, which sits behind a gateway; the article's author
+tapped the bus and fed it to the adapter through an OBD splitter.
+
+To use it, pick the adapter under "OBD adapter", then "CAN bus: Porsche
+718 Cayman / GT4" under "Read". During setup the adapter:
+
+1. turns on silent monitoring, so it never acknowledges or sends anything
+   on the car's bus;
+2. listens to all traffic for 3 seconds and lists which identifiers it
+   saw: the recording screen names any of the profile's identifiers that
+   are missing, which shows at once whether the tap is on the right bus;
+3. sets a pass filter for each of the profile's identifiers, so the
+   Bluetooth link carries only what is decoded, and monitors from then on.
+
+The raw messages go in the session file with the profile, so exports and
+the replay tool decode them with the same definitions. The data CSV gets a
+column per signal and the VBO file a channel per signal.
+
+Doubtful in the source data, so check against your own data:
+- Steering angle and yaw rate have no left/right sign: the source gives
+  none, and the direction bit is probably elsewhere in the message.
+- The PDK gear signal is a guess at the bit order of RaceChrono's
+  bitsToUInt. The manual gear signal is little-endian like the rest.
+- The DBC gives the brake light an offset of 1; the profile uses 0.
+
+`Dbc.parse` reads a DBC file into signals; there is no screen for loading
+one yet. The RaceBox Emulator acts as an OBDLink too and sends the 718's
+messages from the simulated driving.
 
 ## Exporting
 

@@ -41,6 +41,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
+import laptimer.core.CanMeaning
+import laptimer.core.CanMonitor
+import laptimer.core.CanProfile
+import laptimer.core.CanProfiles
 import laptimer.core.ObdChannel
 import laptimer.core.ObdPoller
 import java.util.UUID
@@ -59,11 +63,18 @@ object ObdPrefs {
     fun save(c: Context, t: ObdTarget?) {
         prefs(c).edit {
             if (t == null) {
-                clear()
+                remove("address").remove("name").remove("transport")
             } else {
                 putString("address", t.address).putString("name", t.name).putString("transport", t.transport.name)
             }
         }
+    }
+
+    /** The CAN profile to read with, or null for standard OBD-II. */
+    fun loadCanProfile(c: Context): CanProfile? = prefs(c).getString("canProfile", null)?.let { id -> CanProfiles.ALL.find { it.id == id } }
+
+    fun saveCanProfile(c: Context, p: CanProfile?) {
+        prefs(c).edit { if (p == null) remove("canProfile") else putString("canProfile", p.id) }
     }
 }
 
@@ -120,6 +131,39 @@ private class ObdScanner(context: Context, private val onFound: (ObdTarget) -> U
  * adapter (OBDLink MX+ or LX), or a BLE adapter found by scanning
  * (OBDLink CX). The choice is remembered.
  */
+/**
+ * What to read through the adapter: standard OBD-II readings, or a car's
+ * own CAN messages with a profile. CAN needs an OBDLink (STN chip) and,
+ * on most recent cars, a tap behind the gateway.
+ */
+@Composable
+fun ReadModePicker(selected: CanProfile?, onSelect: (CanProfile?) -> Unit) {
+    val context = LocalContext.current
+    Text("Read", style = MaterialTheme.typography.titleSmall)
+    for (option in listOf<CanProfile?>(null) + CanProfiles.ALL) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable {
+                    onSelect(option)
+                    ObdPrefs.saveCanProfile(context, option)
+                }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected?.id == option?.id, onClick = null)
+            Text(option?.let { "CAN bus: ${it.name}" } ?: "Standard OBD-II readings", Modifier.padding(start = 8.dp))
+        }
+    }
+    if (selected != null) {
+        Text(
+            "Listens silently to the car's CAN bus for ${selected.signals.size} signals. Needs an OBDLink, and usually a tap " +
+                "behind the car's gateway: the factory OBD port may not carry these messages. Source: ${selected.source}",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
 @SuppressLint("MissingPermission") // DevicePicker only shows this with the Bluetooth permissions granted.
 @Composable
 fun ObdPicker(selected: ObdTarget?, onSelect: (ObdTarget?) -> Unit) {
@@ -180,6 +224,92 @@ fun ObdPicker(selected: ObdTarget?, onSelect: (ObdTarget?) -> Unit) {
         style = MaterialTheme.typography.bodySmall,
     )
 }
+
+/** CAN signals on the recording screen, by what they measure. */
+@Composable
+fun CanPanel(obd: ObdStatus, profile: CanProfile) {
+    val c = obd.can
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            "CAN: " + when {
+                obd.connection == ObdConnection.CONNECTING -> "connecting to ${obd.target.name}"
+                obd.connection == ObdConnection.RECONNECTING -> "connection lost, reconnecting"
+                c == null || c.phase == CanMonitor.Phase.STARTING -> "setting up the adapter"
+                c.phase == CanMonitor.Phase.SURVEY -> "surveying the bus"
+                c.phase == CanMonitor.Phase.FILTERING -> "setting filters"
+                else -> listOfNotNull(c.adapter, c.framesPerSecond?.let { "%.0f messages/s".format(it) }).joinToString(", ")
+            },
+            style = MaterialTheme.typography.titleSmall,
+        )
+        if (c == null) return@Column
+        c.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        if (c.surveyCounts.isNotEmpty() && c.missingIds.isNotEmpty()) {
+            Text(
+                "Not seen: " + c.missingIds.sorted().joinToString(" ") { "%03X".format(it) } +
+                    ". The survey saw ${c.surveyCounts.size} other IDs.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFC62828),
+            )
+        }
+        if (c.overflows > 0) Text("The adapter dropped messages ${c.overflows} times (buffer full).", style = MaterialTheme.typography.bodySmall)
+
+        fun v(m: CanMeaning): Double? = profile.signal(m)?.let { c.values[it.name] }
+        fun fmt(m: CanMeaning, pattern: String) = v(m)?.let { pattern.format(it) }
+
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(fmt(CanMeaning.RPM, "%.0f") ?: "-", fontSize = 40.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+            Text("rpm")
+            v(CanMeaning.GEAR)?.let { g ->
+                // On the manual gearbox 13 is reverse and 14 not engaged; 0 means stopped.
+                Text(
+                    when (g.toInt()) {
+                        13 -> "R"
+                        0, 14 -> "N"
+                        else -> g.toInt().toString()
+                    },
+                    fontSize = 40.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        v(CanMeaning.RPM)?.let { Bar(it / RPM_FULL_SCALE, if (it > RPM_WARN) Color(0xFFC62828) else Color(0xFF1E88E5)) }
+        v(CanMeaning.THROTTLE)?.let {
+            Text("Throttle %.0f %%".format(it))
+            Bar(it / 100, Color(0xFF2E7D32))
+        }
+        v(CanMeaning.BRAKE_PRESSURE)?.let {
+            Text("Brake %.0f bar".format(it))
+            Bar(it / BRAKE_FULL_SCALE_BAR, Color(0xFFC62828))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+            Reading("Steering", fmt(CanMeaning.STEERING_ANGLE, "%.0f°"))
+            Reading("Lateral", fmt(CanMeaning.LATERAL_G, "%+.2f g"))
+            Reading("Yaw", fmt(CanMeaning.YAW_RATE, "%.1f °/s"))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            for ((m, label) in listOf(
+                CanMeaning.WHEEL_SPEED_FL to "FL", CanMeaning.WHEEL_SPEED_FR to "FR",
+                CanMeaning.WHEEL_SPEED_RL to "RL", CanMeaning.WHEEL_SPEED_RR to "RR",
+            )) {
+                Reading(label, fmt(m, "%.1f"))
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+            Reading("Oil", fmt(CanMeaning.OIL_PRESSURE, "%.1f bar"))
+            Reading("Manifold", fmt(CanMeaning.MANIFOLD_PRESSURE, "%.2f bar"))
+            Reading("Fuel", fmt(CanMeaning.FUEL_LEVEL, "%.0f L"))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+            Reading("Coolant", fmt(CanMeaning.COOLANT_TEMP, "%.0f °C"))
+            Reading("Oil", fmt(CanMeaning.OIL_TEMP, "%.0f °C"))
+            Reading("Intake", fmt(CanMeaning.INTAKE_TEMP, "%.0f °C"))
+        }
+    }
+}
+
+/** A brake bar's full scale: hard braking on a road car reaches 100 bar or more. */
+private const val BRAKE_FULL_SCALE_BAR = 150.0
 
 /** Engine readings on the recording screen. */
 @Composable

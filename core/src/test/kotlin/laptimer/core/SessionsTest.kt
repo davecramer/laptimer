@@ -177,6 +177,40 @@ class SessionsTest {
         assertTrue(data.all { it.split(" ").size == columns.size })
     }
 
+    @Test
+    fun canSignalsAppearInTheSummaryAndExports() {
+        val sim = sim()
+        val file = File(dir, "g.ltlog")
+        val profile = CanProfiles.PORSCHE_718
+        SimulatedSession.write(file, sim, 30.0, track(sim), can = profile)
+        val s = summarizeSession(file)
+        assertEquals(profile, s.canProfile)
+        assertEquals(profile.signals.map { it.name }.toSet(), s.canSignalsSeen)
+        // The fast messages carry 19 signals between them, 25 times a second, for most of 30 s.
+        assertTrue(s.canValues in 12_000..16_000, "values ${s.canValues}")
+        // No OBD readings are decoded from CAN traffic.
+        assertEquals(emptySet(), s.obdChannels)
+
+        val rows = StringWriter().also { SessionExport.writeDataCsv(file, null, it, s.canProfile) }.toString().lines().filter { it.isNotEmpty() }
+        val header = rows[0].split(",")
+        val rpm = header.indexOf("can_RPM")
+        val speed = header.indexOf("speed_kmh")
+        val canSpeed = header.indexOf("can_Displayed_speed")
+        assertTrue(rpm > 0 && canSpeed > 0)
+        // Late in the drive, the car's speed signal agrees with GPS speed to within its 0.32 km/h step.
+        val late = rows[rows.size - 10].split(",")
+        assertEquals(late[speed].toDouble(), late[canSpeed].toDouble(), 3.0)
+        assertTrue(late[rpm].toDouble() in 850.0..6600.0)
+
+        val vbo = StringWriter().also { SessionExport.writeVbo(file, s, it) }.toString().split("\r\n")
+        val columns = vbo[vbo.indexOf("[column names]") + 1].split(" ")
+        assertTrue("Wheel_speed_FL" in columns && "Brake_pressure" in columns)
+        val units = vbo.subList(vbo.indexOf("[channel units]") + 1, vbo.indexOf("[comments]") - 1)
+        assertTrue(units.all { u -> u.all { it.code < 128 } }, units.toString())
+        val data = vbo.dropWhile { it != "[data]" }.drop(1).filter { it.isNotEmpty() }
+        assertTrue(data.all { it.split(" ").size == columns.size })
+    }
+
     private companion object {
         val DATA_COLUMNS = SessionExport.DATA_CSV_HEADER.split(",").size
     }

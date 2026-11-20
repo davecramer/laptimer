@@ -190,6 +190,9 @@ private fun SessionDetail(file: File, onClose: () -> Unit, onDeleted: () -> Unit
             return@Column
         }
         Text(listOfNotNull(s.device, s.durationS?.let { duration(it) }, "${s.fixes} fixes").joinToString(", "))
+        s.canProfile?.let { p ->
+            Text("CAN data (${p.name}): ${s.canSignalsSeen.size} of ${p.signals.size} signals, ${s.canValues} values")
+        }
         if (s.obdChannels.isNotEmpty()) {
             Text("Engine data: " + s.obdChannels.sortedBy { it.ordinal }.joinToString(", ") { it.label } + " (${s.obdReadings} readings)")
         }
@@ -229,7 +232,7 @@ private fun SessionDetail(file: File, onClose: () -> Unit, onDeleted: () -> Unit
                 share("$base-laps.csv", "text/csv") { SessionExport.writeLapsCsv(s, it) }
             }) { Text("Laps CSV") }
             OutlinedButton(onClick = {
-                share("$base-data.csv", "text/csv") { SessionExport.writeDataCsv(file, override, it) }
+                share("$base-data.csv", "text/csv") { SessionExport.writeDataCsv(file, override, it, s.canProfile) }
             }) { Text("Data CSV") }
             OutlinedButton(onClick = {
                 share("$base.vbo", "application/octet-stream") { SessionExport.writeVbo(file, s, it) }

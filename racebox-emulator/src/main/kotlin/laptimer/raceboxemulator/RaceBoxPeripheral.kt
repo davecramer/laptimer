@@ -27,6 +27,7 @@ import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import laptimer.core.CanFrame
 import laptimer.core.Elm327Emulator
 import laptimer.core.EngineState
 import laptimer.core.GpsFix
@@ -43,6 +44,8 @@ data class ClientInfo(
     /** Subscribed to the OBD adapter's replies. */
     val obdSubscribed: Boolean = false,
     val obdCommands: Long = 0,
+    /** The phone has the emulated OBDLink listening to the CAN bus. */
+    val canMonitoring: Boolean = false,
 )
 
 data class PeripheralStatus(
@@ -75,6 +78,8 @@ class RaceBoxPeripheral(
     private val context: Context,
     private val fixAt: (unixMs: Long) -> GpsFix,
     private val engineAt: () -> EngineState?,
+    /** The emulated car's CAN messages at a time in milliseconds. */
+    private val canFramesAt: (Long) -> List<CanFrame>,
     /** False makes the emulated car answer as with the ignition off. */
     private val ignitionOn: () -> Boolean,
 ) {
@@ -302,7 +307,8 @@ class RaceBoxPeripheral(
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             handler.post {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    clients[device.address] = Client(device).apply { elm = Elm327Emulator(engineAt) }
+                    // An OBDLink: STN commands, so CAN monitoring works as on the real adapter.
+                    clients[device.address] = Client(device).apply { elm = Elm327Emulator(engineAt, stn = true, canFrames = canFramesAt) }
                 } else {
                     clients.remove(device.address)
                 }
@@ -428,6 +434,15 @@ class RaceBoxPeripheral(
                     c.framesSent++
                 }
             }
+            // CAN traffic for phones monitoring through the emulated OBDLink.
+            val obdChar = obdNotify
+            if (obdChar != null) {
+                for (c in clients.values) {
+                    if (!c.obdSubscribed || !c.elm.monitoring) continue
+                    val traffic = c.elm.monitorOutput(frameMs)
+                    if (traffic.isNotEmpty()) enqueue(c, obdChar, traffic.toByteArray(Charsets.US_ASCII))
+                }
+            }
         }
         // The screen doesn't need 25 updates a second.
         if (now - lastPublishMs >= 500) publish()
@@ -480,7 +495,10 @@ class RaceBoxPeripheral(
             advertising = advertising,
             error = error,
             clients = clients.values.map {
-                ClientInfo(it.device.address, it.mtu, it.subscribed, it.framesSent, it.framesDropped, it.obdSubscribed, it.obdCommands)
+                ClientInfo(
+                    it.device.address, it.mtu, it.subscribed, it.framesSent, it.framesDropped,
+                    it.obdSubscribed, it.obdCommands, it.obdSubscribed && it.elm.monitoring,
+                )
             },
             commandsReceived = commands,
         )

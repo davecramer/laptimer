@@ -179,12 +179,18 @@ class BleObdLink(
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                g.discoverServices()
+                // CAN monitoring streams hundreds of lines a second: larger
+                // packets carry several each. A refusal still works.
+                if (!g.requestMtu(247)) g.discoverServices()
                 return
             }
             g.close()
             if (gatt === g) gatt = null
             if (!closed) listener.onObdDisconnected(failure ?: "connection state $newState, status $status")
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            g.discoverServices()
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
