@@ -144,6 +144,39 @@ class SessionsTest {
         assertEquals("140000.04", data[1].split(" ")[1])
     }
 
+    @Test
+    fun obdReadingsAppearInTheSummaryAndExports() {
+        val sim = sim()
+        val file = File(dir, "f.ltlog")
+        SimulatedSession.write(file, sim, 60.0, track(sim), obd = true)
+        val s = summarizeSession(file)
+        assertEquals(ObdChannel.entries.toSet(), s.obdChannels)
+        // About 50 exchanges a second, less the setup.
+        assertTrue(s.obdReadings in 2_000..3_000, "readings ${s.obdReadings}")
+
+        val rows = StringWriter().also { SessionExport.writeDataCsv(file, null, it) }.toString().lines().filter { it.isNotEmpty() }
+        val header = rows[0].split(",")
+        val rpm = header.indexOf("rpm")
+        val boost = header.indexOf("boost_kpa")
+        val last = rows.last().split(",")
+        assertEquals(header.size, last.size)
+        val rpmValue = last[rpm].toDouble()
+        assertTrue(rpmValue in 850.0..6600.0, "rpm $rpmValue")
+        assertTrue(last[boost].isNotEmpty())
+        // The first fix comes before any reading.
+        assertEquals("", rows[1].split(",")[rpm])
+
+        val vbo = StringWriter().also { SessionExport.writeVbo(file, s, it) }.toString().split("\r\n")
+        val sections = vbo.filter { it.startsWith("[") }
+        assertEquals(listOf("[header]", "[channel units]", "[comments]", "[column names]", "[data]"), sections)
+        val columns = vbo[vbo.indexOf("[column names]") + 1].split(" ")
+        assertEquals(listOf("sats", "time", "lat", "long", "velocity", "heading", "height", "RPM", "Throttle", "OBD_Speed", "MAP", "MAF", "Coolant", "IAT", "Oil_Temp", "Baro", "Boost"), columns)
+        val units = vbo.subList(vbo.indexOf("[channel units]") + 1, vbo.indexOf("[comments]") - 1)
+        assertEquals(10, units.size)
+        val data = vbo.dropWhile { it != "[data]" }.drop(1).filter { it.isNotEmpty() }
+        assertTrue(data.all { it.split(" ").size == columns.size })
+    }
+
     private companion object {
         val DATA_COLUMNS = SessionExport.DATA_CSV_HEADER.split(",").size
     }

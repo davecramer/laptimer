@@ -190,6 +190,9 @@ private fun SessionDetail(file: File, onClose: () -> Unit, onDeleted: () -> Unit
             return@Column
         }
         Text(listOfNotNull(s.device, s.durationS?.let { duration(it) }, "${s.fixes} fixes").joinToString(", "))
+        if (s.obdChannels.isNotEmpty()) {
+            Text("Engine data: " + s.obdChannels.sortedBy { it.ordinal }.joinToString(", ") { it.label } + " (${s.obdReadings} readings)")
+        }
         if (s.logEnd != LogEnd.CLEAN) {
             // The app was stopped mid-write; everything before that point is intact.
             Text("The file ends early (the app stopped while recording). Data up to then is complete.")

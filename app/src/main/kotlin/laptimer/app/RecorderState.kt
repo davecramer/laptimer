@@ -28,6 +28,8 @@ data class RecorderStatus(
      * fix, so the screen can run the lap clock smoothly between updates.
      */
     val timingAtNanos: Long = 0,
+    /** The OBD adapter's state, or null when the session doesn't use one. */
+    val obd: ObdStatus? = null,
 )
 
 /** Status shared between [RecordingService] and the screen. */

@@ -126,6 +126,7 @@ private fun DevicePicker(status: RecorderStatus) {
     // Tracks ready for timing. Picking none still records.
     val tracks = remember { trackStore(context).loadAll().tracks.filter { it.problems().isEmpty() } }
     var trackId by rememberSaveable { mutableStateOf<String?>(null) }
+    var obdTarget by remember { mutableStateOf(ObdPrefs.load(context)) }
     if (trackId != null && tracks.none { it.id == trackId }) trackId = null
 
     Text("Lap Timer", style = MaterialTheme.typography.headlineMedium)
@@ -165,6 +166,9 @@ private fun DevicePicker(status: RecorderStatus) {
             askBluetooth.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
         }) { Text("Turn on Bluetooth") }
         else -> {
+            ObdPicker(obdTarget) { obdTarget = it }
+            Spacer(Modifier.height(16.dp))
+            Text("RaceBox", style = MaterialTheme.typography.titleMedium)
             Button(
                 enabled = !scanning,
                 onClick = {
@@ -184,7 +188,7 @@ private fun DevicePicker(status: RecorderStatus) {
                             .fillMaxWidth()
                             .clickable {
                                 scanner.stop()
-                                RecordingService.start(context, d.address, d.name, trackId)
+                                RecordingService.start(context, d.address, d.name, trackId, obdTarget)
                             }
                             .padding(vertical = 12.dp),
                     )
@@ -201,6 +205,10 @@ private fun RecordingScreen(status: RecorderStatus) {
     val timing = status.timing
     if (timing != null && status.trackName != null) {
         LiveTiming(status.trackName, timing, status.timingAtNanos, streaming = status.phase == Phase.STREAMING)
+        Spacer(Modifier.height(16.dp))
+    }
+    status.obd?.let {
+        EnginePanel(it)
         Spacer(Modifier.height(16.dp))
     }
     // With a track, the device details are secondary and shown smaller.

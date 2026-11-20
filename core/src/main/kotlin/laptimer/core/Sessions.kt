@@ -8,15 +8,18 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * Reads a session log in order: metadata records go to [onMetadata] and
- * each decoded GPS fix to [onFix]. Returns how the file ended.
+ * Reads a session log in order: metadata records go to [onMetadata], OBD
+ * readings to [onObd], and each decoded GPS fix to [onFix]. Returns how
+ * the file ended.
  */
 fun readSession(
     file: File,
     onMetadata: (Map<String, String>) -> Unit = {},
+    onObd: (ObdSample) -> Unit = {},
     onFix: (GpsFix) -> Unit,
 ): LogEnd {
     val parser = UbxStreamParser()
+    val obd = ElmReplySplitter()
     return SessionLogReader(file).use { reader ->
         while (true) {
             val record = reader.next() ?: break
@@ -24,6 +27,9 @@ fun readSession(
                 SessionLogFormat.TYPE_METADATA -> onMetadata(SessionLogReader.parseMetadata(record))
                 SessionLogFormat.TYPE_DEVICE_BYTES -> for (frame in parser.feed(record.payload)) {
                     RaceBox.decodeFix(frame)?.let(onFix)
+                }
+                SessionLogFormat.TYPE_OBD_RECEIVED -> for (lines in obd.feed(record.payload)) {
+                    ObdReplies.samples(lines, record.timeNanos).forEach(onObd)
                 }
             }
         }
@@ -45,6 +51,9 @@ data class SessionSummary(
     /** From the first fix to the last, on the receiver's clock. */
     val durationS: Double?,
     val logEnd: LogEnd,
+    /** The engine readings the session has, empty if no OBD adapter was used. */
+    val obdChannels: Set<ObdChannel> = emptySet(),
+    val obdReadings: Long = 0,
 )
 
 /**
@@ -59,8 +68,14 @@ fun summarizeSession(file: File, track: Track? = null): SessionSummary {
     var firstTowMs: Long? = null
     var lastTowMs: Long? = null
     var elapsedMs = 0L
+    val obdChannels = mutableSetOf<ObdChannel>()
+    var obdReadings = 0L
     val end = readSession(
         file,
+        onObd = { s ->
+            obdChannels += s.channel
+            obdReadings++
+        },
         onMetadata = { m ->
             m["startUtc"]?.let { s -> startUtc = runCatching { Instant.parse(s) }.getOrNull() }
             m["device"]?.let { device = it }
@@ -88,6 +103,8 @@ fun summarizeSession(file: File, track: Track? = null): SessionSummary {
         fixes = fixes,
         durationS = if (firstTowMs == null) null else elapsedMs / 1000.0,
         logEnd = end,
+        obdChannels = obdChannels,
+        obdReadings = obdReadings,
     )
 }
 
@@ -109,17 +126,33 @@ object SessionExport {
         }
     }
 
-    const val DATA_CSV_HEADER =
+    /** Engine columns, in the order written; empty until the first reading. */
+    private val CSV_OBD = listOf(
+        ObdChannel.RPM to "rpm",
+        ObdChannel.THROTTLE to "throttle_pct",
+        ObdChannel.SPEED to "obd_speed_kmh",
+        ObdChannel.MANIFOLD_PRESSURE to "manifold_kpa",
+        ObdChannel.MASS_AIRFLOW to "airflow_gs",
+        ObdChannel.COOLANT_TEMP to "coolant_c",
+        ObdChannel.INTAKE_TEMP to "intake_c",
+        ObdChannel.OIL_TEMP to "oil_c",
+        ObdChannel.BAROMETRIC_PRESSURE to "barometric_kpa",
+    )
+
+    val DATA_CSV_HEADER =
         "utc,gps_tow_ms,lap,lap_time_s,fix_ok,satellites,lat,lon,altitude_m,h_acc_m,speed_kmh,heading_deg," +
-            "accel_x_g,accel_y_g,accel_z_g,rotation_x_dps,rotation_y_dps,rotation_z_dps"
+            "accel_x_g,accel_y_g,accel_z_g,rotation_x_dps,rotation_y_dps,rotation_z_dps," +
+            CSV_OBD.joinToString(",") { it.second } + ",boost_kpa"
 
     /**
      * One row per GPS fix, with the lap it was in and the time into that
-     * lap, timed on [track] or on the track stored in the session.
+     * lap, timed on [track] or on the track stored in the session. Engine
+     * columns hold the latest reading received before the fix, so a
+     * reading is at most one polling round old.
      */
     fun writeDataCsv(file: File, track: Track?, out: Writer) {
         out.write(DATA_CSV_HEADER + "\n")
-        forEachTimedFix(file, track) { fix, lap, lapTimeS ->
+        forEachTimedFix(file, track) { fix, lap, lapTimeS, obd ->
             out.write(
                 listOf(
                     fix.utcEpochNanos?.let { Instant.ofEpochSecond(0, it).toString() } ?: "",
@@ -140,7 +173,9 @@ object SessionExport {
                     "%.2f".format(Locale.ROOT, fix.rotationXDps),
                     "%.2f".format(Locale.ROOT, fix.rotationYDps),
                     "%.2f".format(Locale.ROOT, fix.rotationZDps),
-                ).joinToString(",") + "\n",
+                ).joinToString(",") + "," +
+                    CSV_OBD.joinToString(",") { (c, _) -> obd[c]?.let { "%.2f".format(Locale.ROOT, it) } ?: "" } + "," +
+                    (obd.boostKpa?.let { "%.1f".format(Locale.ROOT, it) } ?: "") + "\n",
             )
         }
     }
@@ -161,11 +196,21 @@ object SessionExport {
      */
     fun writeVbo(file: File, summary: SessionSummary, out: Writer, createdAt: Instant = Instant.now()) {
         fun line(s: String = "") = out.write(s + "\r\n")
+        // Engine readings become user channels, each named in the header and given a unit.
+        val engine = VBO_OBD.filter { it.channel in summary.obdChannels }
+        val boost = ObdChannel.MANIFOLD_PRESSURE in summary.obdChannels && ObdChannel.BAROMETRIC_PRESSURE in summary.obdChannels
+        val userNames = engine.map { it.name } + if (boost) listOf("Boost") else emptyList()
+        val userUnits = engine.map { it.unit } + if (boost) listOf("kPa") else emptyList()
         line("File created on " + DateTimeFormatter.ofPattern("dd/MM/yyyy 'at' HH:mm:ss", Locale.ROOT).withZone(ZoneOffset.UTC).format(createdAt))
         line()
         line("[header]")
-        listOf("satellites", "time", "latitude", "longitude", "velocity kmh", "heading", "height").forEach { line(it) }
+        (listOf("satellites", "time", "latitude", "longitude", "velocity kmh", "heading", "height") + userNames).forEach { line(it) }
         line()
+        if (userNames.isNotEmpty()) {
+            line("[channel units]")
+            userUnits.forEach { line(it) }
+            line()
+        }
         line("[comments]")
         line("Exported by laptimer")
         summary.track?.let { line("Track: ${it.name}") }
@@ -173,15 +218,34 @@ object SessionExport {
         summary.startUtc?.let { line("Recorded: $it") }
         line()
         line("[column names]")
-        line("sats time lat long velocity heading height")
+        line((listOf("sats", "time", "lat", "long", "velocity", "heading", "height") + userNames).joinToString(" "))
         line()
         line("[data]")
-        readSession(file) { fix ->
+        var obd = ObdValues()
+        readSession(file, onObd = { obd = obd.with(it) }) { fix ->
             val utc = fix.utcEpochNanos
             if (!fix.fixOk || !fix.positionValid || utc == null) return@readSession
-            line(vboRow(fix, utc))
+            // A channel not read yet is written as 0: every row needs every column.
+            val user = engine.map { "%.2f".format(Locale.ROOT, obd[it.channel] ?: 0.0) } +
+                if (boost) listOf("%.1f".format(Locale.ROOT, obd.boostKpa ?: 0.0)) else emptyList()
+            line((listOf(vboRow(fix, utc)) + user).joinToString(" "))
         }
     }
+
+    private class VboChannel(val channel: ObdChannel, val name: String, val unit: String)
+
+    /** Names without spaces, as columns are separated by spaces; units in plain ASCII. */
+    private val VBO_OBD = listOf(
+        VboChannel(ObdChannel.RPM, "RPM", "rpm"),
+        VboChannel(ObdChannel.THROTTLE, "Throttle", "%"),
+        VboChannel(ObdChannel.SPEED, "OBD_Speed", "km/h"),
+        VboChannel(ObdChannel.MANIFOLD_PRESSURE, "MAP", "kPa"),
+        VboChannel(ObdChannel.MASS_AIRFLOW, "MAF", "g/s"),
+        VboChannel(ObdChannel.COOLANT_TEMP, "Coolant", "C"),
+        VboChannel(ObdChannel.INTAKE_TEMP, "IAT", "C"),
+        VboChannel(ObdChannel.OIL_TEMP, "Oil_Temp", "C"),
+        VboChannel(ObdChannel.BAROMETRIC_PRESSURE, "Baro", "kPa"),
+    )
 
     internal fun vboRow(fix: GpsFix, utcEpochNanos: Long): String {
         val dayNanos = Math.floorMod(utcEpochNanos, 86_400_000_000_000L)
@@ -203,11 +267,13 @@ object SessionExport {
         ).joinToString(" ")
     }
 
-    /** Each fix with the lap it falls in and the time into that lap, or nulls outside a lap. */
-    private fun forEachTimedFix(file: File, track: Track?, onFix: (GpsFix, Int?, Double?) -> Unit) {
+    /** Each fix with its lap and time into the lap (null outside a lap) and the latest engine readings. */
+    private fun forEachTimedFix(file: File, track: Track?, onFix: (GpsFix, Int?, Double?, ObdValues) -> Unit) {
         var timer: LapTimer? = track?.let { LapTimer(it) }
+        var obd = ObdValues()
         readSession(
             file,
+            onObd = { obd = obd.with(it) },
             onMetadata = { m ->
                 val stored = m["track"]
                 if (stored != null && timer == null) timer = runCatching { LapTimer(TrackJson.decode(stored)) }.getOrNull()
@@ -215,10 +281,10 @@ object SessionExport {
         ) { fix ->
             val t = timer
             if (t == null) {
-                onFix(fix, null, null)
+                onFix(fix, null, null, obd)
             } else {
                 t.feed(fix)
-                onFix(fix, t.state.currentLapNumber, t.state.currentLapS)
+                onFix(fix, t.state.currentLapNumber, t.state.currentLapS, obd)
             }
         }
     }

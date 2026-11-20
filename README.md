@@ -33,6 +33,13 @@ OpenStreetMap.
     point on it, searching only the stretch the car can have reached since
     the last match. Matching by position rather than distance driven keeps
     the delta right when the car takes a different line.
+  - `Obd.kt`: engine data from an OBD-II adapter that speaks the ELM327
+    command set, such as an OBDLink. The poller sets the adapter up, asks
+    the car which readings it supports, then reads RPM, throttle, speed,
+    manifold pressure and airflow in rotation, and coolant, intake air and
+    oil temperature and barometric pressure about once a second.
+  - `ObdEmulation.kt`: an emulated ELM327 adapter and a simple engine model,
+    for the RaceBox emulator app and tests.
   - `Sessions.kt`: reads a session log, summarizes it with its laps, and
     exports it as a laps CSV, a data CSV (one row per fix, with lap number
     and time into the lap), or a Racelogic VBO file.
@@ -164,6 +171,39 @@ tab, and have the RaceBox Emulator drive Laguna Seca.
 
 The session file stores the whole track, so the replay tool can time a
 session again later, even after the track is edited or deleted.
+
+## Engine data (OBD-II)
+
+The app reads an OBD-II adapter alongside the RaceBox. OBDLink adapters
+work over Bluetooth Classic (MX+, LX) or BLE (CX).
+
+1. MX+ or LX: pair the adapter in Android's Bluetooth settings first,
+   pressing its button when asked. CX and other BLE adapters need no
+   pairing.
+2. Turn the ignition on.
+3. On the Record tab, pick the adapter under "OBD adapter" (BLE adapters
+   appear after "Find BLE adapters"), then connect the RaceBox as usual.
+
+The recording screen then shows RPM, throttle, boost, OBD speed and
+temperatures. The OBD side connects and reconnects on its own; a session
+never waits for it. Everything the adapter sends is stored in the session
+file, so the data CSV and VBO exports include the engine readings, each
+taken as the latest reading before the GPS fix.
+
+Notes:
+- Fast readings share the adapter: with five fast channels, each updates
+  about a fifth as often as the adapter answers. An OBDLink on a CAN car
+  answers 50 or more times a second; a cheap clone 5 to 10.
+- Manifold pressure (PID 0B) tops out at 255 kPa, so boost above about
+  1.5 bar reads as the maximum.
+- The BLE side looks for the common serial layouts (service FFF0, FFE0 or
+  18F0), then any custom service with a notify and a write characteristic.
+  It has not been tried with a real OBDLink CX yet.
+
+To test without a car, the RaceBox Emulator also acts as a BLE OBD
+adapter, with readings that follow the simulated driving. Pick it under
+"OBD adapter" after "Find BLE adapters". Its "Ignition" button tests a car
+that stops answering.
 
 ## Exporting
 

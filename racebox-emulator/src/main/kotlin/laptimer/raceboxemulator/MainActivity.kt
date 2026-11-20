@@ -68,7 +68,8 @@ object Emulator {
     private var peripheral: RaceBoxPeripheral? = null
 
     fun peripheral(context: Context): RaceBoxPeripheral =
-        peripheral ?: RaceBoxPeripheral(context.applicationContext, drive::fixAt).also { peripheral = it }
+        peripheral ?: RaceBoxPeripheral(context.applicationContext, drive::fixAt, drive::engine) { drive.ignitionOn }
+            .also { peripheral = it }
 
     /** A generic name: OSM services ask clients to identify the software, not the person. */
     val osm by lazy { OsmClient(UrlConnectionTransport("laptimer-racebox-emulator/0.1")) }
@@ -192,7 +193,13 @@ private fun EmulatorScreen() {
                             (if (c.subscribed) "streaming, ${c.framesSent} frames sent" else "waiting for notifications") +
                             if (c.framesDropped > 0) ", ${c.framesDropped} backlogs dropped" else "",
                     )
+                    if (c.obdSubscribed) Text("   OBD adapter in use: ${c.obdCommands} commands answered")
                 }
+                var ignition by remember { mutableStateOf(Emulator.drive.ignitionOn) }
+                TextButton(onClick = {
+                    ignition = !ignition
+                    Emulator.drive.ignitionOn = ignition
+                }) { Text(if (ignition) "Ignition on (tap to turn off)" else "Ignition off (tap to turn on)") }
                 if (ble.commandsReceived > 0) Text("Commands received and ignored: ${ble.commandsReceived}")
                 if (adapter.name?.startsWith("RaceBox") != true) {
                     TextButton(onClick = { adapter.setName("RaceBox Emulator") }) {

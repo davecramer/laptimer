@@ -51,6 +51,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     private var log: SessionLogWriter? = null
     private var parser = UbxStreamParser()
     private var lapTimer: LapTimer? = null
+    private var obd: ObdController? = null
     private val references: ReferenceStore by lazy { referenceStore(this) }
     private val recentTimes = ArrayDeque<Long>()
     private var status = RecorderStatus()
@@ -79,7 +80,14 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
                 val address = intent.getStringExtra(EXTRA_ADDRESS)
                 val name = intent.getStringExtra(EXTRA_NAME) ?: address
                 val trackId = intent.getStringExtra(EXTRA_TRACK_ID)
-                handler.post { if (address != null) begin(address, name ?: "RaceBox", trackId) }
+                val obdTarget = intent.getStringExtra(EXTRA_OBD_ADDRESS)?.let { a ->
+                    ObdTarget(
+                        address = a,
+                        name = intent.getStringExtra(EXTRA_OBD_NAME) ?: a,
+                        transport = ObdTransport.valueOf(intent.getStringExtra(EXTRA_OBD_TRANSPORT) ?: ObdTransport.BLE.name),
+                    )
+                }
+                handler.post { if (address != null) begin(address, name ?: "RaceBox", trackId, obdTarget) }
             }
             ACTION_STOP -> handler.post { finish() }
         }
@@ -96,7 +104,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     }
 
     @SuppressLint("MissingPermission") // MainActivity checks BLUETOOTH_CONNECT first.
-    private fun begin(address: String, name: String, trackId: String?) {
+    private fun begin(address: String, name: String, trackId: String?, obdTarget: ObdTarget?) {
         if (connection != null) return
         val track = trackId?.let { id -> trackStore(this).loadAll().tracks.find { it.id == id } }
             ?.takeIf { it.problems().isEmpty() }
@@ -141,10 +149,42 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         val adapter = getSystemService(BluetoothManager::class.java).adapter
         connection = RaceBoxConnection(this, adapter.getRemoteDevice(address), handler, this)
             .also { it.connect() }
+
+        // The OBD adapter connects on its own schedule; the session doesn't wait for it.
+        if (obdTarget != null) {
+            writeEvent("obdAdapter" to obdTarget.name, "obdAddress" to obdTarget.address, "obdTransport" to obdTarget.transport.name)
+            if (log == null) return
+            obd = ObdController(this, obdTarget, handler, obdLog) { s, important ->
+                status = status.copy(obd = s)
+                publish(status, force = important)
+            }.also {
+                status = status.copy(obd = it.status)
+                it.start()
+            }
+        }
+    }
+
+    /** Records the OBD adapter's traffic. A failed write ends the session, as for the RaceBox's. */
+    private val obdLog = object : ObdController.Log {
+        override fun sent(timeNanos: Long, command: String) = record { it.writeObdSent(timeNanos, command) }
+        override fun received(timeNanos: Long, data: ByteArray) = record { it.writeObdReceived(timeNanos, data) }
+
+        private fun record(write: (SessionLogWriter) -> Unit) {
+            val writer = log ?: return
+            try {
+                write(writer)
+            } catch (e: IOException) {
+                status = status.copy(error = "Writing the session file failed: ${e.message}")
+                publish(status, force = true)
+                finish()
+            }
+        }
     }
 
     private fun finish() {
         val wasRecording = connection != null || log != null
+        obd?.stop()
+        obd = null
         stopRescan()
         connection?.close()
         connection = null
@@ -357,6 +397,9 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         private const val EXTRA_ADDRESS = "address"
         private const val EXTRA_NAME = "name"
         private const val EXTRA_TRACK_ID = "trackId"
+        private const val EXTRA_OBD_ADDRESS = "obdAddress"
+        private const val EXTRA_OBD_NAME = "obdName"
+        private const val EXTRA_OBD_TRANSPORT = "obdTransport"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
         private const val RECONNECT_DELAY_MS = 2_000L
@@ -371,15 +414,22 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         fun sessionDirectory(context: Context): File =
             File(context.getExternalFilesDir(null) ?: context.filesDir, "sessions")
 
-        /** Starts a session. With [trackId], laps are timed on that track. */
-        fun start(context: Context, address: String, name: String, trackId: String?) {
-            context.startForegroundService(
-                Intent(context, RecordingService::class.java)
-                    .setAction(ACTION_START)
-                    .putExtra(EXTRA_ADDRESS, address)
-                    .putExtra(EXTRA_NAME, name)
-                    .putExtra(EXTRA_TRACK_ID, trackId),
-            )
+        /**
+         * Starts a session. With [trackId], laps are timed on that track;
+         * with [obd], engine data is read from that adapter too.
+         */
+        fun start(context: Context, address: String, name: String, trackId: String?, obd: ObdTarget? = null) {
+            val intent = Intent(context, RecordingService::class.java)
+                .setAction(ACTION_START)
+                .putExtra(EXTRA_ADDRESS, address)
+                .putExtra(EXTRA_NAME, name)
+                .putExtra(EXTRA_TRACK_ID, trackId)
+            if (obd != null) {
+                intent.putExtra(EXTRA_OBD_ADDRESS, obd.address)
+                    .putExtra(EXTRA_OBD_NAME, obd.name)
+                    .putExtra(EXTRA_OBD_TRANSPORT, obd.transport.name)
+            }
+            context.startForegroundService(intent)
         }
 
         fun stop(context: Context) {

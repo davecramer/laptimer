@@ -27,12 +27,23 @@ import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import laptimer.core.Elm327Emulator
+import laptimer.core.EngineState
 import laptimer.core.GpsFix
 import laptimer.core.RaceBox
 import java.util.UUID
 
 /** One connected phone, as the screen shows it. */
-data class ClientInfo(val address: String, val mtu: Int, val subscribed: Boolean, val framesSent: Long, val framesDropped: Long)
+data class ClientInfo(
+    val address: String,
+    val mtu: Int,
+    val subscribed: Boolean,
+    val framesSent: Long,
+    val framesDropped: Long,
+    /** Subscribed to the OBD adapter's replies. */
+    val obdSubscribed: Boolean = false,
+    val obdCommands: Long = 0,
+)
 
 data class PeripheralStatus(
     /** The user started it and hasn't stopped it. It may still be waiting for Bluetooth. */
@@ -50,12 +61,23 @@ data class PeripheralStatus(
  * frames sent as notifications on TX every 40 ms (25 Hz), as the real
  * device does.
  *
+ * It also acts as a BLE OBD adapter (ELM327) on service FFF0, the layout
+ * most BLE adapters use: commands written to FFF2, replies notified on
+ * FFF1. Each phone gets its own emulated adapter, with engine readings
+ * from [engineAt].
+ *
  * All Bluetooth callbacks are moved onto one thread, so the state here
  * needs no locking. The caller must hold BLUETOOTH_ADVERTISE and
  * BLUETOOTH_CONNECT.
  */
 @SuppressLint("MissingPermission")
-class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs: Long) -> GpsFix) {
+class RaceBoxPeripheral(
+    private val context: Context,
+    private val fixAt: (unixMs: Long) -> GpsFix,
+    private val engineAt: () -> EngineState?,
+    /** False makes the emulated car answer as with the ignition off. */
+    private val ignitionOn: () -> Boolean,
+) {
     private val thread = HandlerThread("racebox-peripheral").apply { start() }
     private val handler = Handler(thread.looper)
     private val manager = context.getSystemService(BluetoothManager::class.java)
@@ -65,6 +87,8 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
 
     private var server: BluetoothGattServer? = null
     private var tx: BluetoothGattCharacteristic? = null
+    private var obdService: BluetoothGattService? = null
+    private var obdNotify: BluetoothGattCharacteristic? = null
     private var running = false
 
     /** True from start() until stop(), including while Bluetooth is off. */
@@ -77,7 +101,13 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         /** 23 until the phone asks for more. Each notification carries MTU - 3 bytes. */
         var mtu = 23
         var subscribed = false
-        val queue = ArrayDeque<ByteArray>()
+        var obdSubscribed = false
+        var obdCommands = 0L
+        val obdInput = StringBuilder()
+        lateinit var elm: Elm327Emulator
+
+        /** Pieces waiting to be notified, each with the characteristic it goes on. */
+        val queue = ArrayDeque<Pair<BluetoothGattCharacteristic, ByteArray>>()
         var inFlight = false
         var inFlightSinceMs = 0L
         var framesSent = 0L
@@ -148,10 +178,27 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         )
         service.addCharacteristic(txc)
         service.addCharacteristic(rxc)
+
+        val obd = BluetoothGattService(OBD_SERVICE, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+        val obdNotifyChar = BluetoothGattCharacteristic(OBD_NOTIFY, BluetoothGattCharacteristic.PROPERTY_NOTIFY, 0)
+        obdNotifyChar.addDescriptor(
+            BluetoothGattDescriptor(CLIENT_CONFIG, BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE),
+        )
+        obd.addCharacteristic(obdNotifyChar)
+        obd.addCharacteristic(
+            BluetoothGattCharacteristic(
+                OBD_WRITE,
+                BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
+                BluetoothGattCharacteristic.PERMISSION_WRITE,
+            ),
+        )
+        obdService = obd
+        obdNotify = obdNotifyChar
         server = s
         tx = txc
         running = true
-        // Advertising starts once the service is registered, in onServiceAdded.
+        // The OBD service, then advertising, follow in onServiceAdded: the
+        // server takes one service at a time.
         if (!s.addService(service)) {
             stopNow()
             publish(error = "Could not add the RaceBox service.")
@@ -185,6 +232,8 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         server?.close()
         server = null
         tx = null
+        obdService = null
+        obdNotify = null
         running = false
         publish()
     }
@@ -202,7 +251,9 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
             .build()
         // The 128-bit service UUID nearly fills the 31-byte advertisement,
         // so the name goes in the scan response.
-        val data = AdvertiseData.Builder().addServiceUuid(ParcelUuid(SERVICE)).build()
+        // Both services, so the lap timer finds this as a RaceBox and as an
+        // OBD adapter. The 128-bit and 16-bit UUIDs together still fit.
+        val data = AdvertiseData.Builder().addServiceUuid(ParcelUuid(SERVICE)).addServiceUuid(ParcelUuid(OBD_SERVICE)).build()
         val response = AdvertiseData.Builder().setIncludeDeviceName(includeName).build()
         nameIncluded = includeName
         advertiser.startAdvertising(settings, data, response, advertiseCallback)
@@ -234,10 +285,16 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
     private val callback = object : BluetoothGattServerCallback() {
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
             handler.post {
-                if (status == BluetoothGatt.GATT_SUCCESS && running) {
+                if (!running) return@post
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    publish(error = "Adding the ${service.uuid} service failed (status $status).")
+                    return@post
+                }
+                val obd = obdService
+                if (service.uuid == SERVICE && obd != null) {
+                    if (server?.addService(obd) != true) publish(error = "Could not add the OBD service.")
+                } else {
                     startAdvertising(includeName = true)
-                } else if (running) {
-                    publish(error = "Adding the RaceBox service failed (status $status).")
                 }
             }
         }
@@ -245,7 +302,7 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             handler.post {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    clients[device.address] = Client(device)
+                    clients[device.address] = Client(device).apply { elm = Elm327Emulator(engineAt) }
                 } else {
                     clients.remove(device.address)
                 }
@@ -273,9 +330,10 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
             val v = value?.copyOf()
             handler.post {
                 val ok = descriptor.uuid == CLIENT_CONFIG
-                if (ok) {
-                    clients[device.address]?.subscribed =
-                        v != null && v.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                val on = v != null && v.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                val c = clients[device.address]
+                if (ok && c != null) {
+                    if (descriptor.characteristic.uuid == OBD_NOTIFY) c.obdSubscribed = on else c.subscribed = on
                 }
                 if (responseNeeded) {
                     val status = if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
@@ -292,7 +350,8 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
             descriptor: BluetoothGattDescriptor,
         ) {
             handler.post {
-                val on = clients[device.address]?.subscribed == true
+                val c = clients[device.address]
+                val on = if (descriptor.characteristic.uuid == OBD_NOTIFY) c?.obdSubscribed == true else c?.subscribed == true
                 val value = if (on) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
                 server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, value)
             }
@@ -307,9 +366,11 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
             offset: Int,
             value: ByteArray?,
         ) {
+            val v = value?.copyOf()
             handler.post {
                 if (characteristic.uuid == RX) commands++
-                if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                if (responseNeeded) server?.sendResponse(device, requestId, GATT_SUCCESS, 0, null)
+                if (characteristic.uuid == OBD_WRITE && v != null) clients[device.address]?.let { onObdBytes(it, v) }
                 publish()
             }
         }
@@ -319,6 +380,24 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
                 val c = clients[device.address] ?: return@post
                 c.inFlight = false
                 pump(c)
+            }
+        }
+    }
+
+    /** Commands end in a carriage return; each gets its reply as notifications. */
+    private fun onObdBytes(c: Client, bytes: ByteArray) {
+        for (b in bytes) {
+            val ch = (b.toInt() and 0xFF).toChar()
+            if (ch == '\r') {
+                val command = c.obdInput.toString()
+                c.obdInput.setLength(0)
+                if (command.isBlank()) continue
+                c.obdCommands++
+                c.elm.carOn = ignitionOn()
+                val characteristic = obdNotify ?: return
+                enqueue(c, characteristic, c.elm.reply(command).toByteArray(Charsets.US_ASCII))
+            } else if (c.obdInput.length < 64) {
+                c.obdInput.append(ch)
             }
         }
     }
@@ -341,9 +420,13 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         if (frameMs != lastFrameMs) {
             lastFrameMs = frameMs
             val subscribed = clients.values.filter { it.subscribed }
-            if (subscribed.isNotEmpty()) {
+            val characteristic = tx
+            if (subscribed.isNotEmpty() && characteristic != null) {
                 val frame = RaceBox.encodeFrame(fixAt(frameMs))
-                for (c in subscribed) enqueue(c, frame)
+                for (c in subscribed) {
+                    enqueue(c, characteristic, frame)
+                    c.framesSent++
+                }
             }
         }
         // The screen doesn't need 25 updates a second.
@@ -351,7 +434,7 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         scheduleTick()
     }
 
-    private fun enqueue(c: Client, frame: ByteArray) {
+    private fun enqueue(c: Client, characteristic: BluetoothGattCharacteristic, frame: ByteArray) {
         // A phone that stops reading would make the queue grow without
         // limit. Drop what's waiting instead, as a real device's buffer would.
         if (c.queue.size > MAX_QUEUED_PIECES) {
@@ -362,10 +445,9 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         var off = 0
         while (off < frame.size) {
             val end = minOf(frame.size, off + size)
-            c.queue.addLast(frame.copyOfRange(off, end))
+            c.queue.addLast(characteristic to frame.copyOfRange(off, end))
             off = end
         }
-        c.framesSent++
         pump(c)
     }
 
@@ -373,10 +455,9 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
     @Suppress("DEPRECATION")
     private fun pump(c: Client) {
         val s = server ?: return
-        val characteristic = tx ?: return
         // If the stack never confirms a notification, don't stall forever.
         if (c.inFlight && SystemClock.uptimeMillis() - c.inFlightSinceMs < STALL_MS) return
-        val piece = c.queue.firstOrNull() ?: return
+        val (characteristic, piece) = c.queue.firstOrNull() ?: return
         val sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             s.notifyCharacteristicChanged(c.device, characteristic, false, piece) == BluetoothStatusCodes.SUCCESS
         } else {
@@ -398,7 +479,9 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
             running = running,
             advertising = advertising,
             error = error,
-            clients = clients.values.map { ClientInfo(it.device.address, it.mtu, it.subscribed, it.framesSent, it.framesDropped) },
+            clients = clients.values.map {
+                ClientInfo(it.device.address, it.mtu, it.subscribed, it.framesSent, it.framesDropped, it.obdSubscribed, it.obdCommands)
+            },
             commandsReceived = commands,
         )
     }
@@ -414,5 +497,11 @@ class RaceBoxPeripheral(private val context: Context, private val fixAt: (unixMs
         private val TX: UUID = UUID.fromString(RaceBox.TX_CHARACTERISTIC)
         private val RX: UUID = UUID.fromString(RaceBox.RX_CHARACTERISTIC)
         private val CLIENT_CONFIG: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        private fun short(id: String): UUID = UUID.fromString("0000$id-0000-1000-8000-00805F9B34FB")
+        private val OBD_SERVICE = short("FFF0")
+        private val OBD_NOTIFY = short("FFF1")
+        private val OBD_WRITE = short("FFF2")
+        private const val GATT_SUCCESS = BluetoothGatt.GATT_SUCCESS
     }
 }

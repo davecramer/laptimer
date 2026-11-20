@@ -34,6 +34,8 @@ data class ReplaySummary(
     /** The track laps were timed on, or null if none was given or stored in the log. */
     val track: Track? = null,
     val timing: TimingState? = null,
+    /** OBD readings per channel. */
+    val obdReadings: Map<laptimer.core.ObdChannel, Long> = emptyMap(),
 )
 
 /**
@@ -55,6 +57,8 @@ fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): Repl
     var fixes = 0L
     var maxSpeed: Double? = null
     var previousTow: Long? = null
+    val obdSplitter = laptimer.core.ElmReplySplitter()
+    val obdCounts = sortedMapOf<laptimer.core.ObdChannel, Long>()
 
     val end = SessionLogReader(file).use { reader ->
         while (true) {
@@ -89,6 +93,11 @@ fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): Repl
                         onFix(fix)
                     }
                 }
+                SessionLogFormat.TYPE_OBD_RECEIVED -> for (lines in obdSplitter.feed(record.payload)) {
+                    for (s in laptimer.core.ObdReplies.samples(lines, record.timeNanos)) {
+                        obdCounts[s.channel] = (obdCounts[s.channel] ?: 0) + 1
+                    }
+                }
             }
         }
         checkNotNull(reader.end)
@@ -113,6 +122,7 @@ fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): Repl
         logEnd = end,
         track = timer?.track,
         timing = timer?.state,
+        obdReadings = obdCounts,
     )
 }
 

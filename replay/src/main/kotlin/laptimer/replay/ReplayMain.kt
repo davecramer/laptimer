@@ -102,6 +102,9 @@ internal fun format(s: ReplaySummary): String = buildString {
     s.medianHorizontalAccuracyM?.let { appendLine("median horizontal accuracy: %.2f m".format(it)) }
     s.maxSpeedMps?.let { appendLine("max speed: %.1f km/h".format(it * 3.6)) }
     appendLine("log end: ${s.logEnd}")
+    if (s.obdReadings.isNotEmpty()) {
+        appendLine("OBD readings: " + s.obdReadings.entries.joinToString(", ") { "${it.key.label} ${it.value}" })
+    }
     val timing = s.timing ?: return@buildString
     appendLine()
     appendLine("track: ${s.track?.name}")

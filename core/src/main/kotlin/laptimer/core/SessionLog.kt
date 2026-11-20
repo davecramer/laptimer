@@ -38,6 +38,17 @@ object SessionLogFormat {
     /** Payload is one Bluetooth notification exactly as received. */
     const val TYPE_DEVICE_BYTES = 2
 
+    /**
+     * Payload is bytes received from an OBD adapter, exactly as received:
+     * ELM327 text replies, which name their reading ("410C..." is RPM), so
+     * they decode without the requests. Readers that predate OBD support
+     * skip these records.
+     */
+    const val TYPE_OBD_RECEIVED = 3
+
+    /** Payload is a command sent to the OBD adapter, for debugging. */
+    const val TYPE_OBD_SENT = 4
+
     /** Refuse lengths above this when reading, so a corrupt length cannot exhaust memory. */
     const val MAX_PAYLOAD_LENGTH = 1 shl 20
 }
@@ -88,6 +99,16 @@ class SessionLogWriter(
 
     fun writeDeviceBytes(timeNanos: Long, data: ByteArray, offset: Int = 0, length: Int = data.size - offset) {
         writeRecord(SessionLogFormat.TYPE_DEVICE_BYTES, timeNanos, data, offset, length)
+    }
+
+    /** Bytes received from the OBD adapter, exactly as received. */
+    fun writeObdReceived(timeNanos: Long, data: ByteArray) {
+        writeRecord(SessionLogFormat.TYPE_OBD_RECEIVED, timeNanos, data)
+    }
+
+    /** A command sent to the OBD adapter. */
+    fun writeObdSent(timeNanos: Long, command: String) {
+        writeRecord(SessionLogFormat.TYPE_OBD_SENT, timeNanos, command.toByteArray(Charsets.US_ASCII))
     }
 
     private fun writeRecord(type: Int, timeNanos: Long, data: ByteArray, offset: Int = 0, length: Int = data.size) {

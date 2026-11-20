@@ -38,6 +38,14 @@ class DriveController {
     private var trackName: String? = null
     private var pace = PACES[0]
     private var sim: DrivingSimulator? = null
+
+    /** The latest state sent as a fix, for the emulated engine. */
+    private var lastState: laptimer.core.DriveState? = null
+    private val startedMs = System.currentTimeMillis()
+
+    /** False makes the emulated OBD adapter answer as with the ignition off. */
+    @Volatile
+    var ignitionOn = true
     private var driveStartMs: Long? = null
     private var fixLostUntilMs = 0L
     private var lastStatusMs = 0L
@@ -83,6 +91,14 @@ class DriveController {
         publish(null, System.currentTimeMillis())
     }
 
+    /**
+     * The emulated engine, following the car's latest fix: idling while
+     * parked or with no track, warming up from when the app started.
+     */
+    @Synchronized
+    fun engine(): laptimer.core.EngineState =
+        laptimer.core.EngineModel.state(lastState ?: EMPTY_STATE, (System.currentTimeMillis() - startedMs) / 1000.0)
+
     /** The receiver loses its fix for [seconds], as under a bridge. */
     @Synchronized
     fun loseFix(seconds: Int) {
@@ -100,6 +116,7 @@ class DriveController {
             return RaceBoxFeed.fix(EMPTY_STATE, unixMs, fixOk = false)
         }
         val state = if (start == null) s.parkedState() else s.stateAt((unixMs - start).coerceAtLeast(0) / 1000.0)
+        lastState = state
         if (unixMs - lastStatusMs >= 250) publish(state, unixMs)
         return RaceBoxFeed.fix(state, unixMs, fixOk)
     }
