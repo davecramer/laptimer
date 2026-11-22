@@ -25,6 +25,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -125,10 +126,11 @@ private fun DevicePicker(status: RecorderStatus) {
 
     // Tracks ready for timing. Picking none still records.
     val tracks = remember { trackStore(context).loadAll().tracks.filter { it.problems().isEmpty() } }
-    var trackId by rememberSaveable { mutableStateOf<String?>(null) }
+    // Finding the track by GPS is the default: it needs nothing picked at the track.
+    var trackId by rememberSaveable { mutableStateOf<String?>(RecordingService.AUTO_TRACK) }
     var obdTarget by remember { mutableStateOf(ObdPrefs.load(context)) }
     var canProfile by remember { mutableStateOf(ObdPrefs.loadCanProfile(context)) }
-    if (trackId != null && tracks.none { it.id == trackId }) trackId = null
+    if (trackId != null && trackId != RecordingService.AUTO_TRACK && tracks.none { it.id == trackId }) trackId = RecordingService.AUTO_TRACK
 
     Text("Lap Timer", style = MaterialTheme.typography.headlineMedium)
     Spacer(Modifier.height(12.dp))
@@ -144,16 +146,18 @@ private fun DevicePicker(status: RecorderStatus) {
 
     Text("Track", style = MaterialTheme.typography.titleMedium)
     if (tracks.isEmpty()) Text("No tracks are ready. Add one in the Tracks tab to time laps.")
-    for (option in listOf<laptimer.core.Track?>(null) + tracks) {
+    val options = listOf(RecordingService.AUTO_TRACK to "Automatic: the nearest saved track, found by GPS") +
+        tracks.map { it.id to it.name } + (null to "No track: record only")
+    for ((id, label) in options) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .clickable { trackId = option?.id }
+                .clickable { trackId = id }
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            RadioButton(selected = trackId == option?.id, onClick = null)
-            Text(option?.name ?: "No track: record only", Modifier.padding(start = 8.dp))
+            RadioButton(selected = trackId == id, onClick = null)
+            Text(label, Modifier.padding(start = 8.dp))
         }
     }
     Spacer(Modifier.height(12.dp))
@@ -206,7 +210,21 @@ private fun RecordingScreen(status: RecorderStatus) {
     val fix = status.lastFix
     val timing = status.timing
     if (timing != null && status.trackName != null) {
-        LiveTiming(status.trackName, timing, status.timingAtNanos, streaming = status.phase == Phase.STREAMING)
+        val label = status.trackName + if (status.trackFoundByGps) " (found by GPS)" else ""
+        LiveTiming(label, timing, status.timingAtNanos, streaming = status.phase == Phase.STREAMING)
+        // Other layouts of the same circuit, or a neighbouring track, are a tap away.
+        if (status.otherTracks.isNotEmpty()) {
+            Text("Not this track? Switching restarts the lap count.", style = MaterialTheme.typography.bodySmall)
+            for (t in status.otherTracks) {
+                OutlinedButton(onClick = { RecordingService.setTrack(context, t.id) }) {
+                    Text("${t.name} (%.1f km)".format(t.distanceM / 1000))
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+    }
+    status.trackSearch?.let {
+        Text(it, style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(16.dp))
     }
     status.obd?.let {

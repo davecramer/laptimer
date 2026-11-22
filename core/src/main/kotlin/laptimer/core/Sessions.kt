@@ -84,6 +84,8 @@ data class SessionSummary(
     /** The engine readings the session has, empty if no OBD adapter was used. */
     val obdChannels: Set<ObdChannel> = emptySet(),
     val obdReadings: Long = 0,
+    /** Where the car first had a good fix, for suggesting a track. */
+    val firstPosition: LatLon? = null,
     /** The CAN profile the session was recorded with, if any. */
     val canProfile: CanProfile? = null,
     /** Names of the profile's signals that had at least one value. */
@@ -93,7 +95,9 @@ data class SessionSummary(
 
 /**
  * Reads a whole session and times its laps on [track], or on the track
- * stored in the session if [track] is null.
+ * stored in the session if [track] is null. If the session stored a new
+ * track partway through, because it was found by GPS or switched by
+ * hand, timing restarts on it from there, as it did live.
  */
 fun summarizeSession(file: File, track: Track? = null): SessionSummary {
     var startUtc: Instant? = null
@@ -106,6 +110,7 @@ fun summarizeSession(file: File, track: Track? = null): SessionSummary {
     val obdChannels = mutableSetOf<ObdChannel>()
     var obdReadings = 0L
     var canProfile: CanProfile? = null
+    var firstPosition: LatLon? = null
     val canSeen = mutableSetOf<String>()
     var canValues = 0L
     val end = readSession(
@@ -123,12 +128,13 @@ fun summarizeSession(file: File, track: Track? = null): SessionSummary {
             m["startUtc"]?.let { s -> startUtc = runCatching { Instant.parse(s) }.getOrNull() }
             m["device"]?.let { device = it }
             val stored = m["track"]
-            if (stored != null && timer == null) {
-                timer = runCatching { LapTimer(TrackJson.decode(stored)) }.getOrNull()
+            if (stored != null && track == null) {
+                runCatching { LapTimer(TrackJson.decode(stored)) }.getOrNull()?.let { timer = it }
             }
         },
     ) { fix ->
         fixes++
+        if (firstPosition == null && TrackLocator.usable(fix)) firstPosition = LatLon(fix.latitudeDeg, fix.longitudeDeg)
         timer?.feed(fix)
         val tow = fix.gpsTimeOfWeekMs
         val last = lastTowMs
@@ -148,6 +154,7 @@ fun summarizeSession(file: File, track: Track? = null): SessionSummary {
         logEnd = end,
         obdChannels = obdChannels,
         obdReadings = obdReadings,
+        firstPosition = firstPosition,
         canProfile = canProfile,
         canSignalsSeen = canSeen,
         canValues = canValues,
@@ -341,7 +348,7 @@ object SessionExport {
             onCan = onCan,
             onMetadata = { m ->
                 val stored = m["track"]
-                if (stored != null && timer == null) timer = runCatching { LapTimer(TrackJson.decode(stored)) }.getOrNull()
+                if (stored != null && track == null) runCatching { LapTimer(TrackJson.decode(stored)) }.getOrNull()?.let { timer = it }
             },
         ) { fix ->
             val t = timer

@@ -76,7 +76,8 @@ fun replay(file: File, track: Track? = null, onFix: (GpsFix) -> Unit = {}): Repl
                         canSignals = runCatching { laptimer.core.CanProfile.fromJson(json) }.getOrNull()?.signals?.groupBy { it.id }
                     }
                     val stored = entries["track"]
-                    if (stored != null && timer == null) timer = LapTimer(TrackJson.decode(stored))
+                    // A later track (found by GPS or switched) restarts timing, as it did live.
+                    if (stored != null && track == null) timer = LapTimer(TrackJson.decode(stored))
                     // The track itself is long; the summary shows its name.
                     metadata.putAll(entries - "track" - laptimer.core.CAN_PROFILE_KEY)
                 }

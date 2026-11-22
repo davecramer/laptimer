@@ -35,6 +35,14 @@ data class OsmTrackCandidate(
      * the driving direction, so new timing lines can face the right way.
      */
     val drivingDirectionKnown: Boolean = false,
+    /**
+     * Where a mapper marked the start/finish line, on one of this track's
+     * own ways, or null if no one has. OpenStreetMap has no single tag for
+     * it; see [Overpass.startFinishScore].
+     */
+    val startFinish: LatLon? = null,
+    /** The tag that marked [startFinish], as "key=value", to tell the user. */
+    val startFinishTag: String? = null,
 ) {
     val lengthM: Double get() = polylines.sumOf { lengthM(it) }
 }
@@ -55,14 +63,18 @@ object Overpass {
 
     fun query(b: Bounds): String {
         val bbox = "(${b.south},${b.west},${b.north},${b.east})"
+        // The tagged nodes on the raceways come too: a start/finish marker is one of them.
         return """
             [out:json][timeout:25];
             (
               way["highway"="raceway"]$bbox;
               way["leisure"="track"]["sport"~"$SPORTS"]$bbox;
               relation["leisure"="track"]["sport"~"$SPORTS"]$bbox;
-            );
-            out geom;
+            )->.tracks;
+            .tracks out geom;
+            way.tracks["highway"="raceway"]->.raceways;
+            node(w.raceways)(if:count_tags() > 0);
+            out;
         """.trimIndent()
     }
 
@@ -78,10 +90,19 @@ object Overpass {
 
         val raceways = mutableListOf<OsmWay>()
         val result = mutableListOf<OsmTrackCandidate>()
+        val markers = mutableMapOf<Long, Marker>()
         for (e in root["elements"]?.jsonArray.orEmpty()) {
             val o = e.jsonObject
             val tags = o["tags"]?.jsonObject
             when (o.str("type")) {
+                "node" -> {
+                    val id = o.long("id") ?: continue
+                    val lat = (o["lat"] as? JsonPrimitive)?.doubleOrNull ?: continue
+                    val lon = (o["lon"] as? JsonPrimitive)?.doubleOrNull ?: continue
+                    val tagMap = tags?.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.contentOrNull?.let { k to it } }?.toMap().orEmpty()
+                    val (score, tag) = startFinishScore(tagMap)
+                    if (score > 0) markers[id] = Marker(LatLon(lat, lon), score, tag!!)
+                }
                 "way" -> {
                     // oneway=-1 means the way is drawn against the driving direction.
                     val oneway = tags?.str("oneway")
@@ -111,14 +132,42 @@ object Overpass {
                 }
             }
         }
-        result += joinRaceways(raceways)
+        result += joinRaceways(raceways, markers)
         return result.sortedByDescending { it.lengthM }
     }
 
     private class OsmWay(val id: Long, val name: String?, val nodes: List<Long>, val geometry: List<LatLon>, val oneway: Boolean)
+    private class Marker(val at: LatLon, val score: Int, val tag: String)
+
+    private val START_FINISH = Regex("""start\s*([/&-]|and)?\s*(finish|ziel)|s\s*/\s*f\b|depart\s*/\s*arrivee""", RegexOption.IGNORE_CASE)
+    private val START_OR_FINISH = Regex("""^\s*(start|finish|start line|finish line|ziel)\s*(\(.*\))?\s*$""", RegexOption.IGNORE_CASE)
+
+    /**
+     * How sure a node's tags make it the start/finish line, 0 for not at
+     * all, with the tag that decided. Mappers use `raceway=start-finish`
+     * (Spa, Brands Hatch, the Nürburgring), but also free text: a
+     * description "Start/Finish" (Laguna Seca, Thunderhill), a name
+     * "Start-Ziel" or just "Start" (Canadian Tire Motorsport Park).
+     */
+    internal fun startFinishScore(tags: Map<String, String>): Pair<Int, String?> {
+        tags["raceway"]?.let { v ->
+            if (v.replace("_", "-").lowercase() in setOf("start-finish", "startfinish", "finish-line", "start-line", "finish")) {
+                return 3 to "raceway=$v"
+            }
+        }
+        for (key in listOf("name", "description", "note", "ref", "timing")) {
+            val v = tags[key] ?: continue
+            if (START_FINISH.containsMatchIn(v)) return 2 to "$key=$v"
+        }
+        for (key in listOf("name", "description", "note", "ref")) {
+            val v = tags[key] ?: continue
+            if (START_OR_FINISH.matches(v)) return 1 to "$key=$v"
+        }
+        return 0 to null
+    }
 
     /** Groups raceway ways that share a node, so a circuit drawn as several ways becomes one candidate. */
-    private fun joinRaceways(ways: List<OsmWay>): List<OsmTrackCandidate> {
+    private fun joinRaceways(ways: List<OsmWay>, markers: Map<Long, Marker>): List<OsmTrackCandidate> {
         val parent = IntArray(ways.size) { it }
         fun find(i: Int): Int {
             var r = i
@@ -138,13 +187,30 @@ object Overpass {
         }
         return ways.indices.groupBy { find(it) }.values.map { group ->
             val members = group.map { ways[it] }
-            // Use the most common name; pit lanes are often unnamed or named differently.
-            val name = members.mapNotNull { it.name }.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
+            val name = circuitName(members.mapNotNull { it.name })
+            // Only a marker on this track's own ways: a neighbouring kart track's doesn't count.
+            val marker = members.flatMap { it.nodes }.distinct().mapNotNull { markers[it] }.maxByOrNull { it.score }
             OsmTrackCandidate(
                 name, "raceway", members.map { it.geometry }, members.map { "way/${it.id}" },
                 drivingDirectionKnown = members.all { it.oneway },
+                startFinish = marker?.at,
+                startFinishTag = marker?.tag,
             )
         }
+    }
+
+    /**
+     * The circuit's name from its ways' names: the one most ways share.
+     * Pit lanes don't count. Where every way has its own name, as at
+     * Canadian Tire Motorsport Park, whose ways are named after corners,
+     * there is no circuit name to find, and null beats naming the whole
+     * circuit after one corner.
+     */
+    private fun circuitName(names: List<String>): String? {
+        val counts = names.filterNot { it.contains("pit", ignoreCase = true) }.groupingBy { it }.eachCount()
+        val best = counts.maxByOrNull { it.value } ?: return null
+        val tied = counts.count { it.value == best.value } > 1
+        return if (tied && best.value == 1 && counts.size > 1) null else best.key
     }
 
     private fun geometry(e: JsonElement?): List<LatLon> = (e as? JsonArray).orEmpty().mapNotNull {

@@ -11,6 +11,7 @@ import laptimer.core.Place
 import laptimer.core.TimingLine
 import laptimer.core.Track
 import laptimer.core.TrackKind
+import laptimer.core.TrackSetup
 import laptimer.core.TrackSource
 import laptimer.core.distanceM
 import laptimer.core.normalizeDeg
@@ -211,16 +212,29 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
     }
 
     fun pickCandidate(c: OsmTrackCandidate) {
+        // Where a mapper marked the start/finish line, place it there, unless one is placed already.
+        val marked = if (track.start == null) TrackSetup.startFinishLine(c) else null
         update(
             track.copy(
                 name = track.name.ifBlank { c.name.orEmpty() },
                 outline = c.polylines,
                 outlineHasDirection = c.drivingDirectionKnown,
                 source = TrackSource(c.osmElements),
+                start = track.start ?: marked,
             ),
         )
         candidates = emptyList()
-        message = "Now place the start/finish line."
+        message = if (marked != null) {
+            selected = Slot.Start
+            "Start/finish line placed where OpenStreetMap marks it (${c.startFinishTag}). Check that it sits on the " +
+                "painted line, and move it if not. " + if (c.drivingDirectionKnown) {
+                    "The arrow follows the mapped driving direction."
+                } else {
+                    "The map doesn't give the driving direction here: check the arrow, and tap Flip if it's wrong."
+                }
+        } else {
+            "Now place the start/finish line."
+        }
         camera = CameraMove(nextSeq(), bounds = boundsOf(c.polylines.flatten()))
     }
 

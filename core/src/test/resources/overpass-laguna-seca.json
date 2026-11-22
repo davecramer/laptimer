@@ -2,7 +2,7 @@
   "version": 0.6,
   "generator": "Overpass API 0.7.62.11 87bfad18",
   "osm3s": {
-    "timestamp_osm_base": "2026-11-19T15:17:10Z",
+    "timestamp_osm_base": "2026-11-22T11:11:41Z",
     "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
   },
   "elements": [
@@ -732,6 +732,15 @@
     "oneway": "yes",
     "sport": "motor",
     "surface": "asphalt"
+  }
+},
+{
+  "type": "node",
+  "id": 8866453726,
+  "lat": 36.5864582,
+  "lon": -121.7566371,
+  "tags": {
+    "description": "Start/Finish"
   }
 }
 

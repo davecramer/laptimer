@@ -32,7 +32,15 @@ data class RecorderStatus(
     val obd: ObdStatus? = null,
     /** The CAN profile the adapter reads with, or null for standard OBD-II. */
     val canProfile: laptimer.core.CanProfile? = null,
+    /** True when the track was found from the car's GPS position rather than picked. */
+    val trackFoundByGps: Boolean = false,
+    /** While looking for the track by GPS: what is happening, for the screen. */
+    val trackSearch: String? = null,
+    /** Other saved tracks near the car, such as other layouts of the same circuit, to switch to. */
+    val otherTracks: List<TrackChoice> = emptyList(),
 )
+
+data class TrackChoice(val id: String, val name: String, val distanceM: Double)
 
 /** Status shared between [RecordingService] and the screen. */
 object RecorderState {

@@ -160,8 +160,24 @@ session log.
 ## Timing laps
 
 1. Add the track in the Tracks tab and place at least the start/finish
-   line.
-2. On the Record tab, pick the track, then scan and tap the RaceBox.
+   line. This is needed once per track. Where a mapper has marked the
+   start/finish line on the circuit in OpenStreetMap, picking the track
+   places it there: the app looks for `raceway=start-finish` on a node of
+   the circuit, or a name, description or note such as "Start/Finish",
+   "Start-Ziel" or "Start". Check it against the painted line. Where
+   there is no marker, add one on openstreetmap.org (log in, Edit, then
+   double-click the circuit's line to add a node and tag it
+   `raceway=start-finish`) or place the line by hand.
+2. On the Record tab, leave the track on "Automatic", then scan and tap
+   the RaceBox. With the first good GPS fix, the app picks the saved track
+   nearest the car, within 3 km of its outline or lines, and starts
+   timing. If none is near yet, it looks again every 10 seconds. Where
+   several saved tracks are near, such as layouts of one circuit, the
+   timing screen offers the others; switching restarts the lap count and
+   is recorded, so replays and exports follow it. You can also pick a
+   track by hand.
+   A session recorded without a track can be timed later: its page on the
+   Sessions tab suggests the saved track nearest where it was recorded.
 3. The first crossing of the start/finish line starts lap 1. A crossing
    less than 10 seconds into a lap is ignored, so creeping over the line
    in the pits doesn't start a new lap.

@@ -42,6 +42,7 @@ import laptimer.core.LogEnd
 import laptimer.core.SessionExport
 import laptimer.core.SessionSummary
 import laptimer.core.Track
+import laptimer.core.TrackLocator
 import laptimer.core.formatDelta
 import laptimer.core.formatLapTime
 import laptimer.core.summarizeSession
@@ -218,7 +219,16 @@ private fun SessionDetail(file: File, onClose: () -> Unit, onDeleted: () -> Unit
 
         val timing = s.timing
         if (timing == null) {
-            Text("This session was recorded without a track. Pick one above to time its laps.")
+            Text("This session was recorded without a track.")
+            // The saved track nearest to where the car first had a good fix.
+            val nearest = s.firstPosition?.let { TrackLocator.nearby(tracks, it).firstOrNull() }
+            if (nearest != null) {
+                Button(onClick = { override = nearest.track }) {
+                    Text("Time it on ${nearest.track.name} (%.1f km away)".format(nearest.distanceM / 1000))
+                }
+            } else {
+                Text("No saved track is near where it was recorded. Add the track in the Tracks tab, then pick it above.")
+            }
         } else if (timing.laps.isEmpty()) {
             Text("No complete laps.")
         } else {

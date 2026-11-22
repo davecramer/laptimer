@@ -25,6 +25,9 @@ import laptimer.core.CAN_PROFILE_KEY
 import laptimer.core.CanProfile
 import laptimer.core.CanProfiles
 import laptimer.core.LapTimer
+import laptimer.core.LatLon
+import laptimer.core.Track
+import laptimer.core.TrackLocator
 import laptimer.core.RaceBox
 import laptimer.core.ReferenceStore
 import laptimer.core.SessionLogWriter
@@ -54,6 +57,10 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     private var log: SessionLogWriter? = null
     private var parser = UbxStreamParser()
     private var lapTimer: LapTimer? = null
+
+    /** Finding the track from GPS: the saved tracks to choose from, and when to look next. */
+    private var autoTracks: List<Track>? = null
+    private var nextTrackSearchNanos = 0L
     private var obd: ObdController? = null
     private val references: ReferenceStore by lazy { referenceStore(this) }
     private val recentTimes = ArrayDeque<Long>()
@@ -94,6 +101,10 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
                 handler.post { if (address != null) begin(address, name ?: "RaceBox", trackId, obdTarget, canProfile) }
             }
             ACTION_STOP -> handler.post { finish() }
+            ACTION_SET_TRACK -> {
+                val id = intent.getStringExtra(EXTRA_TRACK_ID)
+                handler.post { switchTrack(id) }
+            }
         }
         // If Android kills the service, do not restart it with a null
         // intent; the user starts a new session from the app.
@@ -110,8 +121,11 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     @SuppressLint("MissingPermission") // MainActivity checks BLUETOOTH_CONNECT first.
     private fun begin(address: String, name: String, trackId: String?, obdTarget: ObdTarget?, canProfile: CanProfile?) {
         if (connection != null) return
-        val track = trackId?.let { id -> trackStore(this).loadAll().tracks.find { it.id == id } }
+        val saved = trackStore(this).loadAll().tracks
+        val track = trackId?.takeIf { it != AUTO_TRACK }?.let { id -> saved.find { it.id == id } }
             ?.takeIf { it.problems().isEmpty() }
+        autoTracks = if (trackId == AUTO_TRACK) saved else null
+        nextTrackSearchNanos = 0L
         val file = try {
             newSessionFile()
         } catch (e: IOException) {
@@ -133,20 +147,17 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
             "phone" to "${Build.MANUFACTURER} ${Build.MODEL}",
             "android" to Build.VERSION.RELEASE,
         )
-        // The whole track goes in the log, so the session can be timed
-        // again later even if the track is edited or deleted.
-        if (track != null) writeEvent("trackName" to track.name, "track" to TrackJson.encodeCompact(track))
         parser = UbxStreamParser()
-        // The track's best lap from earlier sessions, so the delta works from the first lap.
-        lapTimer = track?.let { LapTimer(it, initialReference = references.load(it)) }
+        lapTimer = null
         recentTimes.clear()
         status = RecorderStatus(
             phase = Phase.CONNECTING,
             deviceName = name,
             sessionPath = file.absolutePath,
-            trackName = track?.name,
-            timing = lapTimer?.state,
+            trackSearch = if (autoTracks != null) "Waiting for a good GPS fix to find the track." else null,
         )
+        if (track != null) chooseTrack(track, "picked")
+        if (log == null) return
         publish(status, force = true)
 
         this.address = address
@@ -202,6 +213,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         }
         log = null
         lapTimer = null
+        autoTracks = null
         if (wasRecording) {
             // Keep the laps on screen after the session ends.
             publish(
@@ -242,6 +254,7 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
             lastFix = fix
             recentTimes.addLast(fix.gpsTimeOfWeekMs)
             while (recentTimes.size > RATE_WINDOW) recentTimes.removeFirst()
+            if (lapTimer == null && autoTracks != null) findTrack(fix, timeNanos)
             for (lap in lapTimer?.feed(fix).orEmpty()) {
                 lapFinished = true
                 // Timing can be redone from the raw data; this is for reading the log.
@@ -290,6 +303,57 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
         // out of range for a moment.
         handler.postDelayed({ connection?.connect() }, RECONNECT_DELAY_MS)
         startRescan()
+    }
+
+    /**
+     * Starts timing on [track]. The whole track goes in the log, so the
+     * session can be timed again later even if the track is edited or
+     * deleted; a later track in the log restarts timing from there, as here.
+     */
+    private fun chooseTrack(track: Track, how: String, others: List<TrackChoice> = status.otherTracks) {
+        writeEvent("trackName" to track.name, "trackChosen" to how, "track" to TrackJson.encodeCompact(track))
+        if (log == null) return
+        // The track's best lap from earlier sessions, so the delta works from the first lap.
+        lapTimer = LapTimer(track, initialReference = references.load(track))
+        status = status.copy(
+            trackName = track.name,
+            timing = lapTimer?.state,
+            trackFoundByGps = how == "gps",
+            trackSearch = null,
+            otherTracks = others.filter { it.id != track.id },
+        )
+        publish(status, force = true)
+    }
+
+    /**
+     * Picks the nearest saved track once the car has a good fix. If none is
+     * near, it looks again every few seconds: the car may still be on its
+     * way in from the paddock.
+     */
+    private fun findTrack(fix: laptimer.core.GpsFix, nowNanos: Long) {
+        val tracks = autoTracks ?: return
+        if (nowNanos < nextTrackSearchNanos || !TrackLocator.usable(fix)) return
+        nextTrackSearchNanos = nowNanos + TRACK_SEARCH_INTERVAL_NANOS
+        val found = TrackLocator.nearby(tracks, LatLon(fix.latitudeDeg, fix.longitudeDeg))
+        if (found.isEmpty()) {
+            status = status.copy(
+                trackSearch = "No saved track within ${(TrackLocator.DEFAULT_RANGE_M / 1000).toInt()} km. " +
+                    "Recording without timing; add the track in the Tracks tab to time this session later.",
+            )
+            return
+        }
+        val choices = found.map { TrackChoice(it.track.id, it.track.name, it.distanceM) }
+        chooseTrack(found[0].track, "gps", choices)
+    }
+
+    /** Switches to another saved track mid-session, for example another layout of the same circuit. */
+    private fun switchTrack(id: String?) {
+        if (log == null || id == null) return
+        val track = trackStore(this).loadAll().tracks.find { it.id == id }?.takeIf { it.problems().isEmpty() } ?: return
+        val current = lapTimer?.track
+        val others = status.otherTracks + listOfNotNull(current?.let { c -> TrackChoice(c.id, c.name, 0.0) })
+        autoTracks = null
+        chooseTrack(track, "switched", others.distinctBy { it.id })
     }
 
     /**
@@ -401,6 +465,11 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
     companion object {
         private const val ACTION_START = "laptimer.app.START"
         private const val ACTION_STOP = "laptimer.app.STOP"
+        private const val ACTION_SET_TRACK = "laptimer.app.SET_TRACK"
+
+        /** Pass as the track to find it from the car's GPS position. */
+        const val AUTO_TRACK = "auto"
+        private const val TRACK_SEARCH_INTERVAL_NANOS = 10_000_000_000L
         private const val EXTRA_ADDRESS = "address"
         private const val EXTRA_NAME = "name"
         private const val EXTRA_TRACK_ID = "trackId"
@@ -439,6 +508,11 @@ class RecordingService : Service(), RaceBoxConnection.Listener {
                     .putExtra(EXTRA_CAN_PROFILE, canProfileId)
             }
             context.startForegroundService(intent)
+        }
+
+        /** Switches the running session to another saved track. */
+        fun setTrack(context: Context, trackId: String) {
+            context.startService(Intent(context, RecordingService::class.java).setAction(ACTION_SET_TRACK).putExtra(EXTRA_TRACK_ID, trackId))
         }
 
         fun stop(context: Context) {

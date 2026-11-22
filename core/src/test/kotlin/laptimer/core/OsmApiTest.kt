@@ -5,6 +5,7 @@ import java.net.URLDecoder
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -68,6 +69,20 @@ class OsmApiTest {
         assertEquals("track area", area.kind)
         assertEquals(listOf("relation/30"), area.osmElements)
         assertEquals(1, area.polylines.size)
+    }
+
+    @Test
+    fun aCircuitWhoseWaysAreNamedAfterCornersIsLeftUnnamed() {
+        // As at Canadian Tire Motorsport Park: every way has its own name, and the pit lane is drawn first.
+        fun way(id: Int, name: String, from: Int, to: Int) = """
+            { "type": "way", "id": $id, "nodes": [$from, $to],
+              "geometry": [ {"lat": 44.05$from, "lon": -78.67}, {"lat": 44.05$to, "lon": -78.67} ],
+              "tags": { "highway": "raceway", "name": "$name" } }"""
+        val json = """{"elements": [${way(1, "Pit Lane", 1, 2)}, ${way(2, "Moss Corner", 2, 3)}, ${way(3, "Clayton Corner", 3, 4)}]}"""
+        assertNull(Overpass.parse(json).single().name)
+        // One shared name still wins, and a pit lane's name never does.
+        val shared = """{"elements": [${way(1, "Pit Lane", 1, 2)}, ${way(2, "Pit Lane", 2, 3)}, ${way(3, "Mosport", 3, 4)}]}"""
+        assertEquals("Mosport", Overpass.parse(shared).single().name)
     }
 
     @Test
@@ -166,5 +181,74 @@ class OsmRealDataTest {
             .single()
         assertTrue(flipped.drivingDirectionKnown)
         assertEquals(forward.polylines.map { it.reversed() }, flipped.polylines)
+    }
+
+    @Test
+    fun markersOnTheTracksOwnWaysBecomeItsStartFinish() {
+        val sf = Overpass.startFinishScore(mapOf("raceway" to "start-finish"))
+        assertEquals(3 to "raceway=start-finish", sf)
+        assertEquals(2, Overpass.startFinishScore(mapOf("description" to "Start/Finish (East)")).first)
+        assertEquals(2, Overpass.startFinishScore(mapOf("name" to "Start-Ziel")).first)
+        assertEquals(1, Overpass.startFinishScore(mapOf("name" to "Start")).first)
+        // A corner or a start of a pit lane is not the start/finish line.
+        assertEquals(0, Overpass.startFinishScore(mapOf("name" to "Moss Corner")).first)
+        assertEquals(0, Overpass.startFinishScore(mapOf("name" to "Pit lane start")).first)
+        assertEquals(0, Overpass.startFinishScore(emptyMap()).first)
+    }
+
+    @Test
+    fun theQueryAsksForTaggedNodesOnTheRaceways() {
+        val q = Overpass.query(Bounds(36.5, -121.8, 36.6, -121.7))
+        assertTrue(q.contains("node(w.raceways)"), q)
+    }
+}
+
+/** Real responses with start/finish markers, fetched 2026-11-22. Data © OpenStreetMap contributors, ODbL. */
+class StartFinishRealDataTest {
+    private fun candidates(resource: String) = Overpass.parse(javaClass.getResource(resource)!!.readText())
+
+    @Test
+    fun canadianTireMotorsportParkHasItsStartNode() {
+        val gp = candidates("/overpass-ctmp.json").first()
+        // The Grand Prix circuit and pit lane, unnamed: its ways are named after corners.
+        assertNull(gp.name)
+        assertTrue(gp.drivingDirectionKnown)
+        assertEquals("name=Start", gp.startFinishTag)
+        assertEquals(LatLon(44.054306, -78.6739218), gp.startFinish)
+        // The other tracks there have no marker.
+        assertTrue(candidates("/overpass-ctmp.json").drop(1).all { it.startFinish == null })
+
+        val line = assertNotNull(TrackSetup.startFinishLine(gp))
+        assertEquals(0.0, distanceM(line.center, gp.startFinish!!), 0.01)
+        assertEquals(25.0, line.widthM, 1e-6)
+        // The line faces the driving direction: driving the loop crosses it forwards.
+        val loop = TrackLoop.find(gp.polylines, directed = true)!!
+        val snap = snapToPolylines(line.center, listOf(loop + loop.first()))!!
+        val d = kotlin.math.abs(normalizeDeg(snap.segmentBearingDeg - line.forwardBearingDeg))
+        assertTrue(minOf(d, 360 - d) < 30, "line faces ${line.forwardBearingDeg}, track runs ${snap.segmentBearingDeg}")
+    }
+
+    @Test
+    fun lagunaSecaHasItsStartFinishDescription() {
+        val c = candidates("/overpass-laguna-seca.json").single()
+        assertEquals("description=Start/Finish", c.startFinishTag)
+        assertNotNull(TrackSetup.startFinishLine(c))
+    }
+
+    @Test
+    fun lapsAreTimedOnAPlacedLine() {
+        val gp = candidates("/overpass-ctmp.json").first()
+        val track = Track(name = "CTMP", start = TrackSetup.startFinishLine(gp), outline = gp.polylines, outlineHasDirection = true)
+        val loop = TrackLoop.find(gp.polylines, directed = true)!!
+        val sim = DrivingSimulator(loop, DriverProfile(positionNoiseM = 0.3), seed = 3)
+        val timer = LapTimer(track)
+        var k = 0
+        while (k * 0.04 < sim.lapStartS(4)) {
+            timer.feed(RaceBoxFeed.fix(sim.stateAt(k * 0.04), 1_795_000_000_000L + k * 40L))
+            k++
+        }
+        // Three full laps after the first crossing, each about the simulator's lap time.
+        assertEquals(3, timer.state.laps.size)
+        timer.state.laps.forEach { assertEquals(sim.idealLapS, it.timeS, sim.idealLapS * 0.012) }
     }
 }
