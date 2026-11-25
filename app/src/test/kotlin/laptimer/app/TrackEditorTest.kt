@@ -157,4 +157,33 @@ class TrackEditorTest {
         e.pickCandidate(unnamed)
         assertEquals("Canadian Tire Motorsport Park", e.track.name)
     }
+
+    @Test
+    fun tappingAFoundTracksOutlinePicksIt() = kotlinx.coroutines.runBlocking {
+        // A 400 m circuit straight and, 300 m north, a kart track.
+        val overpass = """{"elements": [
+            { "type": "way", "id": 1, "nodes": [1, 2], "tags": { "highway": "raceway", "name": "Circuit" },
+              "geometry": [ {"lat": 36.5843, "lon": -121.7535}, {"lat": 36.5843, "lon": -121.7490} ] },
+            { "type": "way", "id": 2, "nodes": [3, 4], "tags": { "highway": "raceway", "name": "Kart Track" },
+              "geometry": [ {"lat": 36.5870, "lon": -121.7535}, {"lat": 36.5870, "lon": -121.7510} ] } ]}"""
+        val e = TrackEditor(Track(name = ""), OsmClient({ _, _ -> laptimer.core.HttpResponse(200, overpass) }))
+        e.visibleBounds = laptimer.core.Bounds(36.58, -121.76, 36.59, -121.74)
+        e.findTracks()
+        assertEquals(2, e.candidates.size)
+        // Far from both: nothing is picked.
+        e.onMapTap(LatLon(36.5800, -121.7520))
+        assertTrue(e.track.outline.isEmpty())
+        // About 10 m off the kart track.
+        e.onMapTap(LatLon(36.5871, -121.7520))
+        assertEquals("Kart Track", e.track.name)
+        assertTrue(e.candidates.isEmpty())
+    }
+
+    @Test
+    fun theBestSearchMatchNamesTracksBeforeAPlaceIsPicked() = kotlinx.coroutines.runBlocking {
+        val nominatim = """[{"lat": "44.05", "lon": "-78.68", "display_name": "Canadian Tire Motorsport Park, Clarington, Ontario"}]"""
+        val e = TrackEditor(Track(name = ""), OsmClient({ _, _ -> laptimer.core.HttpResponse(200, nominatim) }))
+        e.searchPlaces("mosport")
+        assertEquals("Canadian Tire Motorsport Park", e.nameFor(straight.copy(name = null)))
+    }
 }

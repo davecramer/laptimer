@@ -21,6 +21,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
@@ -195,19 +197,26 @@ private fun TrackEditorScreen(initial: Track, store: TrackStore, onClose: () -> 
                     Text(if (editor.busy) "Searching..." else "Find tracks on this map")
                 }
                 editor.candidates.forEach { c ->
-                    Text(
-                        listOfNotNull(
-                            editor.nameFor(c) ?: "Unnamed track",
-                            c.kind,
-                            "%.1f km".format(c.lengthM / 1000),
-                            "start/finish marked".takeIf { c.startFinish != null },
-                        ).joinToString(", "),
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { editor.pickCandidate(c) }
-                            .padding(vertical = 8.dp),
-                    )
+                    OutlinedCard(onClick = { editor.pickCandidate(c) }, modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(editor.nameFor(c) ?: "Unnamed track", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    listOfNotNull(
+                                        c.kind,
+                                        "%.1f km".format(c.lengthM / 1000),
+                                        "start/finish marked".takeIf { c.startFinish != null },
+                                    ).joinToString(", "),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
+                            Button(onClick = { editor.pickCandidate(c) }) { Text("Use") }
+                        }
+                    }
                 }
             }
 

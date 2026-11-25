@@ -132,7 +132,8 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
     fun onMapTap(p: LatLon) {
         val slot = placing
         if (slot == null) {
-            selectNear(p)
+            val c = candidateNear(p)
+            if (c != null) pickCandidate(c) else selectNear(p)
             return
         }
         val first = firstTap
@@ -204,6 +205,13 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
         selected = null
     }
 
+    /** The found track drawn nearest [p], if the tap was on one. */
+    private fun candidateNear(p: LatLon): OsmTrackCandidate? = candidates
+        .mapNotNull { c -> snapToPolylines(p, c.polylines)?.let { c to it.distanceM } }
+        .filter { it.second <= PICK_DISTANCE_M }
+        .minByOrNull { it.second }
+        ?.first
+
     private fun selectNear(p: LatLon) {
         val nearest = slots()
             .mapNotNull { s -> line(s)?.let { s to distanceM(p, it.center) } }
@@ -254,8 +262,7 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
     fun nameFor(c: OsmTrackCandidate): String? = c.name ?: placeName
 
     fun pickPlace(p: Place) {
-        // Nominatim's display name runs from the place itself out to the country.
-        placeName = p.name.substringBefore(",").trim().ifBlank { null }
+        placeName = shortName(p)
         places = emptyList()
         camera = if (p.bounds != null && p.bounds!!.diagonalM < OsmClient.MAX_SEARCH_DIAGONAL_M) {
             CameraMove(nextSeq(), bounds = p.bounds)
@@ -263,6 +270,9 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
             CameraMove(nextSeq(), center = p.center, zoom = 14.0)
         }
     }
+
+    // Nominatim's display name runs from the place itself out to the country.
+    private fun shortName(p: Place) = p.name.substringBefore(",").trim().ifBlank { null }
 
     fun dismissPlaces() {
         places = emptyList()
@@ -272,6 +282,8 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
     suspend fun searchPlaces(text: String) = runRequest {
         val found = withContext(Dispatchers.IO) { osm.searchPlaces(text) }
         if (found.isEmpty()) message = "No places found for \"$text\"."
+        // Until one is picked, the best match names tracks found nearby.
+        found.firstOrNull()?.let { placeName = shortName(it) }
         places = found
     }
 
@@ -286,7 +298,7 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
         message = if (found.isEmpty()) {
             "No tracks are mapped in this area. You can still place the lines by hand."
         } else {
-            "Found ${found.size}. Pick the track below."
+            "Found ${found.size}. Tap one in the list below, or its outline on the map."
         }
     }
 
@@ -358,6 +370,9 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
 
         /** A tap closer than this to a line's center selects it. */
         const val SELECT_DISTANCE_M = 30.0
+
+        /** A tap closer than this to a found track's outline picks it. */
+        const val PICK_DISTANCE_M = 50.0
     }
 }
 
