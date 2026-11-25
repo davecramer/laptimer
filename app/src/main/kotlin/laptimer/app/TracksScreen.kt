@@ -196,7 +196,12 @@ private fun TrackEditorScreen(initial: Track, store: TrackStore, onClose: () -> 
                 }
                 editor.candidates.forEach { c ->
                     Text(
-                        "${c.name ?: "Unnamed"}: ${c.kind}, %.1f km".format(c.lengthM / 1000),
+                        listOfNotNull(
+                            editor.nameFor(c) ?: "Unnamed track",
+                            c.kind,
+                            "%.1f km".format(c.lengthM / 1000),
+                            "start/finish marked".takeIf { c.startFinish != null },
+                        ).joinToString(", "),
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier
                             .fillMaxWidth()

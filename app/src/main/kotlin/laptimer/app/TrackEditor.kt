@@ -216,7 +216,7 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
         val marked = if (track.start == null) TrackSetup.startFinishLine(c) else null
         update(
             track.copy(
-                name = track.name.ifBlank { c.name.orEmpty() },
+                name = track.name.ifBlank { nameFor(c).orEmpty() },
                 outline = c.polylines,
                 outlineHasDirection = c.drivingDirectionKnown,
                 source = TrackSource(c.osmElements),
@@ -242,7 +242,20 @@ class TrackEditor(initial: Track, private val osm: OsmClient) {
         update(track.copy(outline = emptyList(), outlineHasDirection = false, source = null))
     }
 
+    /** The place last picked from the search, to name tracks whose ways carry no circuit name. */
+    var placeName: String? = null
+        private set
+
+    /**
+     * What to call [c] in the list and when saving: its own name, or the
+     * searched place's, as at Canadian Tire Motorsport Park, whose ways
+     * are named only after corners.
+     */
+    fun nameFor(c: OsmTrackCandidate): String? = c.name ?: placeName
+
     fun pickPlace(p: Place) {
+        // Nominatim's display name runs from the place itself out to the country.
+        placeName = p.name.substringBefore(",").trim().ifBlank { null }
         places = emptyList()
         camera = if (p.bounds != null && p.bounds!!.diagonalM < OsmClient.MAX_SEARCH_DIAGONAL_M) {
             CameraMove(nextSeq(), bounds = p.bounds)

@@ -144,4 +144,17 @@ class TrackEditorTest {
         // Outline, then the line, its arrow shaft and its arrowhead.
         assertEquals(4, e.mapLines().size)
     }
+
+    @Test
+    fun anUnnamedTrackTakesTheSearchedPlacesName() {
+        val e = editor()
+        val unnamed = straight.copy(name = null)
+        assertNull(e.nameFor(unnamed))
+        e.pickPlace(laptimer.core.Place("Canadian Tire Motorsport Park, Mosport Road, Clarington, Ontario, Canada", origin, null))
+        assertEquals("Canadian Tire Motorsport Park", e.nameFor(unnamed))
+        // A track's own name still wins.
+        assertEquals("Test Circuit", e.nameFor(straight))
+        e.pickCandidate(unnamed)
+        assertEquals("Canadian Tire Motorsport Park", e.track.name)
+    }
 }
